@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  flight-mysql:
+    image: mysql:8.0
+    container_name: flight-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: flight_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - flight_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    networks:
+      - flight-network
+
+  flight-redis:
+    image: redis:7-alpine
+    container_name: flight-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - flight_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 5s
+      retries: 5
+    networks:
+      - flight-network
+
+  flight-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flight-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:mysql://flight-mysql:3306/flight_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: rootpassword
+      SPRING_DATA_REDIS_HOST: flight-redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      flight-mysql:
+        condition: service_healthy
+      flight-redis:
+        condition: service_healthy
+    networks:
+      - flight-network
+
+volumes:
+  flight_mysql_data:
+  flight_redis_data:
+
+networks:
+  flight-network:
+    driver: bridge

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  payment-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: payment-service
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      BOOKING_SERVICE_URL: http://host.docker.internal:8083
+    networks:
+      - payment-network
+
+networks:
+  payment-network:
+    driver: bridge

@@ -1,0 +1,38 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: payment-service
+
+# External services
+booking-service:
+  url: ${BOOKING_SERVICE_URL:http://localhost:8083}
+
+# HTTP client configuration
+http:
+  client:
+    connect-timeout-ms: 5000
+    read-timeout-ms: 10000
+
+# Payment configuration
+payment:
+  success-probability: 70
+  failure-probability: 20
+  # timeout-probability is implicit: 100 - success - failure = 10
+  min-processing-delay-ms: 1000
+  max-processing-delay-ms: 5000
+
+# Management endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.flightmanagement: DEBUG

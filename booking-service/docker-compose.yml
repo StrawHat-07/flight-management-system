@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  booking-mysql:
+    image: mysql:8.0
+    container_name: booking-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: booking_db
+    ports:
+      - "3307:3306"
+    volumes:
+      - booking_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    networks:
+      - booking-network
+
+  booking-redis:
+    image: redis:7-alpine
+    container_name: booking-redis
+    ports:
+      - "6380:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - booking_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 5s
+      retries: 5
+    networks:
+      - booking-network
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: booking-service
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:mysql://booking-mysql:3306/booking_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: rootpassword
+      SPRING_DATA_REDIS_HOST: booking-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      FLIGHT_SERVICE_URL: http://host.docker.internal:8081
+      PAYMENT_SERVICE_URL: http://host.docker.internal:8084
+    depends_on:
+      booking-mysql:
+        condition: service_healthy
+      booking-redis:
+        condition: service_healthy
+    networks:
+      - booking-network
+
+volumes:
+  booking_mysql_data:
+  booking_redis_data:
+
+networks:
+  booking-network:
+    driver: bridge
