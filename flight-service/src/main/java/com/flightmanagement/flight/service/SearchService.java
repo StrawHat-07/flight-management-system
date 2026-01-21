@@ -6,56 +6,82 @@ import com.flightmanagement.flight.dto.ComputedFlightEntry;
 import com.flightmanagement.flight.dto.PageResponse;
 import com.flightmanagement.flight.dto.SearchRequest;
 import com.flightmanagement.flight.dto.SearchResponse;
-import com.flightmanagement.flight.exception.FlightValidationException;
+import com.flightmanagement.flight.mapper.SearchMapper;
 import com.flightmanagement.flight.model.Flight;
-import com.flightmanagement.flight.repository.FlightRepository;
+import com.flightmanagement.flight.util.IdGenerator;
+import com.flightmanagement.flight.util.PaginationUtils;
+import com.flightmanagement.flight.util.SortingUtils;
+import com.flightmanagement.flight.util.StringUtils;
+import com.flightmanagement.flight.validator.SearchValidator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
-import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
+/**
+ * Flight search service.
+ * 
+ * Single Responsibility: Search ONLY
+ * - Reads from Redis cache (precomputed routes)
+ * - Fallback to real-time computation if cache miss
+ * - Real-time seat availability checks
+ * - Sorting and pagination
+ * 
+ * Staff Engineer Design:
+ * - Gets graph from FlightGraphService (no parameter passing)
+ * - Redis-first (fast path)
+ * - Graceful degradation (computes on miss, doesn't fail)
+ * - No repository access (uses FlightGraphService)
+ */
 @Service
 @Slf4j
 public class SearchService {
 
-    private static final int MAX_PAGE_SIZE = 100;
-    private static final Set<String> ALLOWED_SORT_FIELDS = Set.of(
-            "price", "durationMinutes", "departureTime", "hops");
-
+    private final FlightGraphService graphService;
     private final CacheService cacheService;
     private final ObjectMapper objectMapper;
-    private final FlightRepository flightRepository;
 
     private final int maxHops;
     private final int cacheTtlHours;
     private final int minConnectionMinutes;
 
     public SearchService(
+            FlightGraphService graphService,
             CacheService cacheService,
             ObjectMapper objectMapper,
-            FlightRepository flightRepository,
             @Value("${search.max-hops:3}") int maxHops,
             @Value("${search.cache-ttl-hours:24}") int cacheTtlHours,
             @Value("${search.min-connection-time-minutes:60}") int minConnectionMinutes) {
+        this.graphService = graphService;
         this.cacheService = cacheService;
         this.objectMapper = objectMapper;
-        this.flightRepository = flightRepository;
         this.maxHops = maxHops;
         this.cacheTtlHours = cacheTtlHours;
         this.minConnectionMinutes = minConnectionMinutes;
     }
 
-    public PageResponse<SearchResponse> searchFlights(SearchRequest request, Map<String, List<Flight>> flightGraph) {
-        validateRequest(request);
+    /**
+     * Searches for flights with specified criteria.
+     * 
+     * Flow:
+     * 1. Validate request
+     * 2. Try Redis cache (fast path)
+     * 3. If cache miss, compute in real-time (fallback)
+     * 4. Filter by seat availability
+     * 5. Sort and paginate
+     * 
+     * @param request Search criteria
+     * @return Paginated search results
+     */
+    public PageResponse<SearchResponse> searchFlights(SearchRequest request) {
+        SearchValidator.validateSearchRequest(request);
 
-        String source = normalize(request.getSource());
-        String destination = normalize(request.getDestination());
+        String source = StringUtils.normalizeLocation(request.getSource());
+        String destination = StringUtils.normalizeLocation(request.getDestination());
         LocalDate date = request.getDate();
         int seats = request.getSeats() != null ? request.getSeats() : 1;
         int hopsLimit = Math.min(request.getMaxHops() != null ? request.getMaxHops() : maxHops, maxHops);
@@ -65,22 +91,24 @@ public class SearchService {
         List<SearchResponse> allResults = new ArrayList<>();
 
         for (int hops = 1; hops <= hopsLimit; hops++) {
-            List<ComputedFlightEntry> routes = findRoutes(source, destination, date, hops, flightGraph);
+            // Try cache first, compute on miss
+            List<ComputedFlightEntry> routes = findRoutes(source, destination, date, hops);
 
             for (ComputedFlightEntry route : routes) {
+                // Real-time seat availability check
                 int available = cacheService.getMinSeatsAcrossFlights(route.getFlightIds());
                 if (available >= seats) {
-                    allResults.add(toResponse(route, hops, available));
+                    allResults.add(SearchMapper.toSearchResponse(route, hops, available));
                 }
             }
         }
 
-        sortResults(allResults, request.getSortBy(), request.getSortDirection());
+        SortingUtils.sortSearchResults(allResults, request.getSortBy(), request.getSortDirection());
 
-        int page = Math.max(0, request.getPage() != null ? request.getPage() : 0);
-        int size = Math.min(Math.max(1, request.getSize() != null ? request.getSize() : 20), MAX_PAGE_SIZE);
+        int page = request.getPage() != null ? request.getPage() : 0;
+        int size = request.getSize() != null ? request.getSize() : 20;
 
-        PageResponse<SearchResponse> pageResponse = paginateResults(allResults, page, size);
+        PageResponse<SearchResponse> pageResponse = PaginationUtils.paginate(allResults, page, size);
 
         log.info("Search complete: {} total results, returning page {} of {}",
                 allResults.size(), page, pageResponse.getTotalPages());
@@ -88,100 +116,35 @@ public class SearchService {
         return pageResponse;
     }
 
-    public ComputedFlightEntry getComputedFlight(String flightIdentifier, Map<String, List<Flight>> flightGraph) {
-        if (!hasText(flightIdentifier)) {
-            throw new FlightValidationException("Flight identifier is required");
-        }
+    /**
+     * Gets computed flight details by identifier.
+     * Used for displaying complete route information.
+     */
+    public ComputedFlightEntry getComputedFlight(String flightIdentifier) {
+        SearchValidator.validateFlightIdentifier(flightIdentifier);
 
-        if (flightIdentifier.startsWith("CF_")) {
-            return reconstructMultiHopFlight(flightIdentifier, flightGraph);
+        Map<String, List<Flight>> graph = graphService.getGraphSnapshot();
+
+        if (IdGenerator.isComputedFlightId(flightIdentifier)) {
+            return reconstructMultiHopFlight(flightIdentifier, graph);
         }
-        return findDirectFlight(flightIdentifier, flightGraph);
+        return findDirectFlight(flightIdentifier, graph);
     }
 
-    public void runPrecomputation(Map<String, List<Flight>> flightGraph) {
-        if (flightGraph == null || flightGraph.isEmpty()) {
-            log.warn("Empty flight graph, skipping precomputation");
-            return;
-        }
-
-        log.info("Starting precomputation...");
-        long start = System.currentTimeMillis();
-
-        Set<String> locations = collectLocations(flightGraph);
-        int routeCount = 0;
-        int daysAhead = 7;
-
-        for (int day = 0; day < daysAhead; day++) {
-            LocalDate date = LocalDate.now().plusDays(day);
-            routeCount += precomputeForDate(date, locations, flightGraph);
-        }
-
-        long elapsed = System.currentTimeMillis() - start;
-        log.info("Precomputation complete: {} routes in {}ms", routeCount, elapsed);
-    }
-
-    private void sortResults(List<SearchResponse> results, String sortBy, String sortDirection) {
-        String field = hasText(sortBy) ? sortBy : "price";
-
-        if (!ALLOWED_SORT_FIELDS.contains(field)) {
-            log.warn("Invalid sort field '{}', defaulting to 'price'", field);
-            field = "price";
-        }
-
-        boolean ascending = !"desc".equalsIgnoreCase(sortDirection);
-
-        Comparator<SearchResponse> comparator = createComparator(field);
-        if (!ascending) {
-            comparator = comparator.reversed();
-        }
-
-        results.sort(comparator);
-    }
-
-    private Comparator<SearchResponse> createComparator(String field) {
-        return switch (field) {
-            case "price" -> Comparator.comparing(SearchResponse::getPrice,
-                    Comparator.nullsLast(Comparator.naturalOrder()));
-            case "durationMinutes" -> Comparator.comparing(SearchResponse::getDurationMinutes,
-                    Comparator.nullsLast(Comparator.naturalOrder()));
-            case "departureTime" -> Comparator.comparing(SearchResponse::getDepartureTime,
-                    Comparator.nullsLast(Comparator.naturalOrder()));
-            case "hops" -> Comparator.comparing(SearchResponse::getHops,
-                    Comparator.nullsLast(Comparator.naturalOrder()));
-            default -> Comparator.comparing(SearchResponse::getPrice,
-                    Comparator.nullsLast(Comparator.naturalOrder()));
-        };
-    }
-
-    private PageResponse<SearchResponse> paginateResults(List<SearchResponse> allResults, int page, int size) {
-        int totalElements = allResults.size();
-        int totalPages = (int) Math.ceil((double) totalElements / size);
-
-        int fromIndex = page * size;
-        int toIndex = Math.min(fromIndex + size, totalElements);
-
-        List<SearchResponse> pageContent = (fromIndex < totalElements)
-                ? allResults.subList(fromIndex, toIndex)
-                : Collections.emptyList();
-
-        return PageResponse.<SearchResponse>builder()
-                .content(pageContent)
-                .page(page)
-                .size(size)
-                .totalElements(totalElements)
-                .totalPages(totalPages)
-                .first(page == 0)
-                .last(page >= totalPages - 1)
-                .hasNext(page < totalPages - 1)
-                .hasPrevious(page > 0)
-                .build();
-    }
-
-    private List<ComputedFlightEntry> findRoutes(String source, String destination, LocalDate date,
-            int hops, Map<String, List<Flight>> flightGraph) {
+    /**
+     * Finds routes from cache or computes on miss.
+     * 
+     * Flow:
+     * 1. Try Redis (fast path)
+     * 2. If miss, get graph and compute (fallback)
+     * 3. Cache result for future requests
+     * 
+     * @return List of computed routes (empty if none found)
+     */
+    private List<ComputedFlightEntry> findRoutes(String source, String destination, LocalDate date, int hops) {
         String dateStr = date.toString();
 
+        // Try Redis cache first
         Optional<Object> cached = cacheService.getCachedRoutes(dateStr, hops, source, destination);
         if (cached.isPresent()) {
             try {
@@ -189,6 +152,7 @@ public class SearchService {
                         cached.get(), new TypeReference<>() {
                         });
                 if (!routes.isEmpty()) {
+                    log.debug("Cache hit: {}->{} on {} ({} hops)", source, destination, date, hops);
                     return routes;
                 }
             } catch (Exception e) {
@@ -196,12 +160,19 @@ public class SearchService {
             }
         }
 
-        log.debug("Cache miss: date={}, hops={}, {}->{}", date, hops, source, destination);
-        List<ComputedFlightEntry> computed = computeRoutes(source, destination, date, hops, flightGraph);
+        // Cache miss: compute in real-time (fallback)
+        log.debug("Cache miss: date={}, hops={}, {}->{}, computing...", date, hops, source, destination);
+
+        Map<String, List<Flight>> graph = graphService.getGraphSnapshot();
+        List<ComputedFlightEntry> computed = computeRoutes(source, destination, date, hops, graph);
 
         if (!computed.isEmpty()) {
+            // Cache for future requests
             cacheService.cacheRoutes(dateStr, hops, source, destination, computed, cacheTtlHours);
+            log.debug("Computed and cached {} routes: {}->{} on {} ({} hops)",
+                    computed.size(), source, destination, date, hops);
         }
+
         return computed;
     }
 
@@ -215,7 +186,7 @@ public class SearchService {
 
         List<ComputedFlightEntry> results = new ArrayList<>(paths.size());
         for (List<Flight> path : paths) {
-            ComputedFlightEntry entry = buildComputedEntry(path);
+            ComputedFlightEntry entry = SearchMapper.toComputedEntry(path);
             if (entry != null) {
                 results.add(entry);
             }
@@ -262,72 +233,19 @@ public class SearchService {
         visited.remove(current);
     }
 
-    private ComputedFlightEntry buildComputedEntry(List<Flight> path) {
-        if (path == null || path.isEmpty()) {
-            return null;
-        }
-
-        Flight first = path.get(0);
-        Flight last = path.get(path.size() - 1);
-
-        List<String> flightIds = new ArrayList<>(path.size());
-        BigDecimal totalPrice = BigDecimal.ZERO;
-        int minSeats = Integer.MAX_VALUE;
-
-        List<ComputedFlightEntry.FlightLeg> legs = new ArrayList<>(path.size());
-
-        for (Flight f : path) {
-            flightIds.add(f.getFlightId());
-            totalPrice = totalPrice.add(f.getPrice());
-            minSeats = Math.min(minSeats, f.getAvailableSeats());
-            legs.add(buildLeg(f));
-        }
-
-        long duration = ChronoUnit.MINUTES.between(first.getDepartureTime(), last.getArrivalTime());
-
-        String id = path.size() == 1
-                ? first.getFlightId()
-                : "CF_" + first.getSource() + "_" + last.getDestination() + "_" + String.join("_", flightIds);
-
-        return ComputedFlightEntry.builder()
-                .computedFlightId(id)
-                .flightIds(flightIds)
-                .source(first.getSource())
-                .destination(last.getDestination())
-                .totalPrice(totalPrice)
-                .totalDurationMinutes(duration)
-                .availableSeats(minSeats == Integer.MAX_VALUE ? 0 : minSeats)
-                .numberOfHops(path.size())
-                .departureTime(first.getDepartureTime())
-                .arrivalTime(last.getArrivalTime())
-                .legs(legs)
-                .build();
-    }
-
-    private ComputedFlightEntry.FlightLeg buildLeg(Flight flight) {
-        return ComputedFlightEntry.FlightLeg.builder()
-                .flightId(flight.getFlightId())
-                .source(flight.getSource())
-                .destination(flight.getDestination())
-                .departureTime(flight.getDepartureTime())
-                .arrivalTime(flight.getArrivalTime())
-                .price(flight.getPrice())
-                .availableSeats(flight.getAvailableSeats())
-                .build();
-    }
-
     private ComputedFlightEntry findDirectFlight(String flightId, Map<String, List<Flight>> graph) {
+        // Search in graph first (in-memory, fast)
         for (List<Flight> flights : graph.values()) {
             for (Flight f : flights) {
                 if (f.getFlightId().equals(flightId)) {
-                    return flightToEntry(f);
+                    return SearchMapper.toComputedEntry(f);
                 }
             }
         }
 
-        return flightRepository.findByFlightId(flightId)
-                .map(this::flightToEntry)
-                .orElse(null);
+        // Not found in graph (shouldn't happen for active flights)
+        log.warn("Flight {} not found in graph", flightId);
+        return null;
     }
 
     private ComputedFlightEntry reconstructMultiHopFlight(String computedId, Map<String, List<Flight>> graph) {
@@ -342,16 +260,13 @@ public class SearchService {
             String flightId = parts[i];
             Flight flight = findFlightInGraph(flightId, graph);
             if (flight == null) {
-                flight = flightRepository.findByFlightId(flightId).orElse(null);
-            }
-            if (flight == null) {
-                log.warn("Cannot reconstruct computed flight, missing: {}", flightId);
+                log.warn("Cannot reconstruct computed flight, missing flight in graph: {}", flightId);
                 return null;
             }
             flights.add(flight);
         }
 
-        ComputedFlightEntry entry = buildComputedEntry(flights);
+        ComputedFlightEntry entry = SearchMapper.toComputedEntry(flights);
         if (entry != null) {
             int realTimeSeats = cacheService.getMinSeatsAcrossFlights(entry.getFlightIds());
             entry.setAvailableSeats(realTimeSeats);
@@ -370,99 +285,4 @@ public class SearchService {
         return null;
     }
 
-    private ComputedFlightEntry flightToEntry(Flight f) {
-        return ComputedFlightEntry.builder()
-                .computedFlightId(f.getFlightId())
-                .flightIds(List.of(f.getFlightId()))
-                .source(f.getSource())
-                .destination(f.getDestination())
-                .totalPrice(f.getPrice())
-                .totalDurationMinutes(Duration.between(f.getDepartureTime(), f.getArrivalTime()).toMinutes())
-                .availableSeats(f.getAvailableSeats())
-                .numberOfHops(1)
-                .departureTime(f.getDepartureTime())
-                .arrivalTime(f.getArrivalTime())
-                .legs(List.of(buildLeg(f)))
-                .build();
-    }
-
-    private Set<String> collectLocations(Map<String, List<Flight>> graph) {
-        Set<String> locations = new HashSet<>(graph.keySet());
-        for (List<Flight> flights : graph.values()) {
-            for (Flight f : flights) {
-                locations.add(f.getDestination());
-            }
-        }
-        return locations;
-    }
-
-    private int precomputeForDate(LocalDate date, Set<String> locations, Map<String, List<Flight>> graph) {
-        int count = 0;
-        String dateStr = date.toString();
-
-        for (String source : locations) {
-            for (String destination : locations) {
-                if (source.equals(destination)) {
-                    continue;
-                }
-                for (int hops = 1; hops <= maxHops; hops++) {
-                    List<ComputedFlightEntry> routes = computeRoutes(source, destination, date, hops, graph);
-                    if (!routes.isEmpty()) {
-                        cacheService.cacheRoutes(dateStr, hops, source, destination, routes, cacheTtlHours);
-                        count += routes.size();
-                    }
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private void validateRequest(SearchRequest request) {
-        if (request == null) {
-            throw new FlightValidationException("Search request is required");
-        }
-        if (!hasText(request.getSource())) {
-            throw new FlightValidationException("Source is required");
-        }
-        if (!hasText(request.getDestination())) {
-            throw new FlightValidationException("Destination is required");
-        }
-        if (normalize(request.getSource()).equals(normalize(request.getDestination()))) {
-            throw new FlightValidationException("Source and destination cannot be the same");
-        }
-        if (request.getDate() == null) {
-            throw new FlightValidationException("Date is required");
-        }
-        if (request.getDate().isBefore(LocalDate.now())) {
-            throw new FlightValidationException("Date cannot be in the past");
-        }
-        if (request.getSeats() != null && request.getSeats() < 1) {
-            throw new FlightValidationException("Seats must be at least 1");
-        }
-    }
-
-    private SearchResponse toResponse(ComputedFlightEntry entry, int hops, int availableSeats) {
-        return SearchResponse.builder()
-                .flightIdentifier(entry.getComputedFlightId())
-                .type(hops == 1 ? "DIRECT" : "COMPUTED")
-                .price(entry.getTotalPrice())
-                .durationMinutes(entry.getTotalDurationMinutes())
-                .availableSeats(availableSeats)
-                .departureTime(entry.getDepartureTime())
-                .arrivalTime(entry.getArrivalTime())
-                .source(entry.getSource())
-                .destination(entry.getDestination())
-                .hops(hops)
-                .legs(entry.getLegs())
-                .build();
-    }
-
-    private String normalize(String s) {
-        return s.trim().toUpperCase();
-    }
-
-    private boolean hasText(String s) {
-        return s != null && !s.isBlank();
-    }
 }

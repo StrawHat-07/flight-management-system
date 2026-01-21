@@ -5,7 +5,6 @@ import com.flightmanagement.flight.dto.PageResponse;
 import com.flightmanagement.flight.dto.SearchRequest;
 import com.flightmanagement.flight.dto.SearchResponse;
 import com.flightmanagement.flight.exception.FlightNotFoundException;
-import com.flightmanagement.flight.service.FlightService;
 import com.flightmanagement.flight.service.SearchService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -15,9 +14,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
-import java.util.Map;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
 
 @Slf4j
 @RestController
@@ -26,9 +22,6 @@ import java.util.concurrent.Executors;
 public class SearchController {
 
     private final SearchService searchService;
-    private final FlightService flightService;
-
-    private final Executor backgroundExecutor = Executors.newFixedThreadPool(2);
 
     @GetMapping
     public ResponseEntity<PageResponse<SearchResponse>> search(
@@ -57,8 +50,7 @@ public class SearchController {
                 .sortDirection(sortDirection)
                 .build();
 
-        PageResponse<SearchResponse> results = searchService.searchFlights(
-                request, flightService.getFlightGraphForSearch());
+        PageResponse<SearchResponse> results = searchService.searchFlights(request);
 
         return ResponseEntity.ok(results);
     }
@@ -69,8 +61,7 @@ public class SearchController {
                 request.getSource(), request.getDestination(), request.getDate(),
                 request.getPage(), request.getSize(), request.getSortBy());
 
-        PageResponse<SearchResponse> results = searchService.searchFlights(
-                request, flightService.getFlightGraphForSearch());
+        PageResponse<SearchResponse> results = searchService.searchFlights(request);
 
         return ResponseEntity.ok(results);
     }
@@ -79,30 +70,12 @@ public class SearchController {
     public ResponseEntity<ComputedFlightEntry> getComputedFlight(@PathVariable String computedFlightId) {
         log.debug("GET /v1/search/computed/{}", computedFlightId);
 
-        ComputedFlightEntry flight = searchService.getComputedFlight(
-                computedFlightId, flightService.getFlightGraphForSearch());
+        ComputedFlightEntry flight = searchService.getComputedFlight(computedFlightId);
 
         if (flight == null) {
             throw new FlightNotFoundException(computedFlightId);
         }
 
         return ResponseEntity.ok(flight);
-    }
-
-    @PostMapping("/recompute")
-    public ResponseEntity<Map<String, String>> triggerRecomputation() {
-        log.info("POST /v1/search/recompute");
-
-        backgroundExecutor.execute(() -> {
-            try {
-                searchService.runPrecomputation(flightService.getFlightGraphForSearch());
-            } catch (Exception e) {
-                log.error("Recomputation failed", e);
-            }
-        });
-
-        return ResponseEntity.accepted().body(Map.of(
-                "status", "ACCEPTED",
-                "message", "Recomputation triggered"));
     }
 }

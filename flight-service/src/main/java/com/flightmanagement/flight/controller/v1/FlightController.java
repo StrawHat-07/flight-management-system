@@ -5,8 +5,10 @@ import com.flightmanagement.flight.dto.FlightFilterCriteria;
 import com.flightmanagement.flight.dto.FlightGraphEntry;
 import com.flightmanagement.flight.dto.PageResponse;
 import com.flightmanagement.flight.enums.FlightStatus;
+import com.flightmanagement.flight.mapper.FlightMapper;
+import com.flightmanagement.flight.model.Flight;
+import com.flightmanagement.flight.service.FlightGraphService;
 import com.flightmanagement.flight.service.FlightService;
-import com.flightmanagement.flight.service.SearchService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,11 +22,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.*;
 
 @Slf4j
 @RestController
@@ -32,23 +30,19 @@ import java.util.concurrent.Executors;
 @RequestMapping("/v1/flights")
 public class FlightController {
 
-    private static final int DEFAULT_PAGE_SIZE = 20;
     private static final int MAX_PAGE_SIZE = 100;
     private static final Set<String> ALLOWED_SORT_FIELDS = Set.of(
             "departureTime", "arrivalTime", "price", "source", "destination",
             "status", "totalSeats", "availableSeats");
 
     private final FlightService flightService;
-    private final SearchService searchService;
-
-    private final Executor backgroundExecutor = Executors.newFixedThreadPool(2);
+    private final FlightGraphService graphService;
 
     @PostMapping
     public ResponseEntity<FlightEntry> create(@Valid @RequestBody FlightEntry entry) {
         log.info("POST /v1/flights: source={}, destination={}", entry.getSource(), entry.getDestination());
 
         FlightEntry created = flightService.createFlight(entry);
-        triggerRecomputationAsync();
 
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
@@ -105,7 +99,6 @@ public class FlightController {
         log.info("PUT /v1/flights/{}", flightId);
 
         FlightEntry updated = flightService.updateFlight(flightId, entry);
-        triggerRecomputationAsync();
 
         return ResponseEntity.ok(updated);
     }
@@ -115,7 +108,6 @@ public class FlightController {
         log.info("DELETE /v1/flights/{}", flightId);
 
         flightService.cancelFlight(flightId);
-        triggerRecomputationAsync();
 
         return ResponseEntity.noContent().build();
     }
@@ -138,7 +130,21 @@ public class FlightController {
     @GetMapping("/graph")
     public ResponseEntity<FlightGraphEntry> getGraph() {
         log.debug("GET /v1/flights/graph");
-        return ResponseEntity.ok(flightService.getFlightGraphSnapshot());
+
+        Map<String, List<Flight>> graph = graphService.getGraphSnapshot();
+        Set<String> locations = graphService.getActiveLocations();
+
+        Map<String, List<FlightEntry>> graphCopy = new HashMap<>();
+        for (Map.Entry<String, List<Flight>> entry : graph.entrySet()) {
+            graphCopy.put(entry.getKey(), FlightMapper.toEntryList(entry.getValue()));
+        }
+
+        FlightGraphEntry graphEntry = FlightGraphEntry.builder()
+                .graph(graphCopy)
+                .locations(new ArrayList<>(locations))
+                .build();
+
+        return ResponseEntity.ok(graphEntry);
     }
 
     @GetMapping("/{flightId}/available-seats")
@@ -174,15 +180,6 @@ public class FlightController {
                 "incremented", seats));
     }
 
-    @PostMapping("/trigger-recomputation")
-    public ResponseEntity<Map<String, String>> triggerRecomputation() {
-        log.info("POST /v1/flights/trigger-recomputation");
-        triggerRecomputationAsync();
-        return ResponseEntity.accepted().body(Map.of(
-                "status", "ACCEPTED",
-                "message", "Recomputation triggered"));
-    }
-
     private Pageable createPageable(int page, int size, String sortBy, String sortDirection) {
         if (!ALLOWED_SORT_FIELDS.contains(sortBy)) {
             log.warn("Invalid sort field '{}', defaulting to 'departureTime'", sortBy);
@@ -194,15 +191,5 @@ public class FlightController {
                 ? Sort.Direction.DESC
                 : Sort.Direction.ASC;
         return PageRequest.of(page, pageSize, Sort.by(direction, sortBy));
-    }
-
-    private void triggerRecomputationAsync() {
-        backgroundExecutor.execute(() -> {
-            try {
-                searchService.runPrecomputation(flightService.getFlightGraphForSearch());
-            } catch (Exception e) {
-                log.error("Recomputation failed", e);
-            }
-        });
     }
 }

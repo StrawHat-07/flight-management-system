@@ -38,216 +38,210 @@ import static org.mockito.Mockito.when;
 @DisplayName("SearchService")
 class SearchServiceTest {
 
-    @Mock
-    private CacheService cacheService;
+        @Mock
+        private FlightGraphService graphService;
 
-    @Mock
-    private FlightRepository flightRepository;
+        @Mock
+        private CacheService cacheService;
 
-    @Spy
-    private ObjectMapper objectMapper = new ObjectMapper();
+        @Spy
+        private ObjectMapper objectMapper = new ObjectMapper();
 
-    private SearchService searchService;
-    private Map<String, List<Flight>> flightGraph;
-    private LocalDate testDate;
+        private SearchService searchService;
+        private Map<String, List<Flight>> flightGraph;
+        private LocalDate testDate;
 
-    @BeforeEach
-    void setUp() {
-        searchService = new SearchService(
-                cacheService,
-                objectMapper,
-                flightRepository,
-                3,
-                24,
-                60
-        );
+        @BeforeEach
+        void setUp() {
+                testDate = LocalDate.now().plusDays(1);
+                flightGraph = createTestGraph(testDate);
 
-        testDate = LocalDate.now().plusDays(1);
-        flightGraph = createTestGraph(testDate);
-    }
+                // Mock FlightGraphService to return test graph
+                when(graphService.getGraphSnapshot()).thenReturn(flightGraph);
 
-    private Map<String, List<Flight>> createTestGraph(LocalDate date) {
-        Map<String, List<Flight>> graph = new HashMap<>();
-
-        Flight direct = createFlight("FL101", "DEL", "BLR", date, 6, 0, 8, 45, 180, 5500.00);
-        Flight leg1 = createFlight("FL103", "DEL", "HYD", date, 8, 0, 10, 30, 160, 5200.00);
-        Flight leg2 = createFlight("FL115", "HYD", "BLR", date, 12, 0, 13, 15, 140, 2700.00);
-
-        graph.put("DEL", List.of(direct, leg1));
-        graph.put("HYD", List.of(leg2));
-
-        return graph;
-    }
-
-    private Flight createFlight(String id, String source, String destination, LocalDate date,
-                                int depHour, int depMin, int arrHour, int arrMin,
-                                int seats, double price) {
-        return Flight.builder()
-                .flightId(id)
-                .source(source)
-                .destination(destination)
-                .departureTime(date.atTime(depHour, depMin))
-                .arrivalTime(date.atTime(arrHour, arrMin))
-                .totalSeats(seats)
-                .availableSeats(seats)
-                .price(BigDecimal.valueOf(price))
-                .build();
-    }
-
-    @Nested
-    @DisplayName("validation")
-    class Validation {
-
-        @Test
-        @DisplayName("rejects null request")
-        void rejectsNullRequest() {
-            assertThatThrownBy(() -> searchService.searchFlights(null, flightGraph))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("required");
+                searchService = new SearchService(
+                                graphService,
+                                cacheService,
+                                objectMapper,
+                                3,
+                                24,
+                                60);
         }
 
-        @Test
-        @DisplayName("rejects missing source")
-        void rejectsMissingSource() {
-            SearchRequest request = SearchRequest.builder()
-                    .destination("BLR")
-                    .date(testDate)
-                    .build();
+        private Map<String, List<Flight>> createTestGraph(LocalDate date) {
+                Map<String, List<Flight>> graph = new HashMap<>();
 
-            assertThatThrownBy(() -> searchService.searchFlights(request, flightGraph))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("Source");
+                Flight direct = createFlight("FL101", "DEL", "BLR", date, 6, 0, 8, 45, 180, 5500.00);
+                Flight leg1 = createFlight("FL103", "DEL", "HYD", date, 8, 0, 10, 30, 160, 5200.00);
+                Flight leg2 = createFlight("FL115", "HYD", "BLR", date, 12, 0, 13, 15, 140, 2700.00);
+
+                graph.put("DEL", List.of(direct, leg1));
+                graph.put("HYD", List.of(leg2));
+
+                return graph;
         }
 
-        @Test
-        @DisplayName("rejects same source and destination")
-        void rejectsSameSourceDestination() {
-            SearchRequest request = SearchRequest.builder()
-                    .source("DEL")
-                    .destination("DEL")
-                    .date(testDate)
-                    .build();
-
-            assertThatThrownBy(() -> searchService.searchFlights(request, flightGraph))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("cannot be the same");
+        private Flight createFlight(String id, String source, String destination, LocalDate date,
+                        int depHour, int depMin, int arrHour, int arrMin,
+                        int seats, double price) {
+                return Flight.builder()
+                                .flightId(id)
+                                .source(source)
+                                .destination(destination)
+                                .departureTime(date.atTime(depHour, depMin))
+                                .arrivalTime(date.atTime(arrHour, arrMin))
+                                .totalSeats(seats)
+                                .availableSeats(seats)
+                                .price(BigDecimal.valueOf(price))
+                                .build();
         }
 
-        @Test
-        @DisplayName("rejects past date")
-        void rejectsPastDate() {
-            SearchRequest request = SearchRequest.builder()
-                    .source("DEL")
-                    .destination("BLR")
-                    .date(LocalDate.now().minusDays(1))
-                    .build();
+        @Nested
+        @DisplayName("validation")
+        class Validation {
 
-            assertThatThrownBy(() -> searchService.searchFlights(request, flightGraph))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("past");
-        }
-    }
+                @Test
+                @DisplayName("rejects null request")
+                void rejectsNullRequest() {
+                        assertThatThrownBy(() -> searchService.searchFlights(null))
+                                        .isInstanceOf(FlightValidationException.class)
+                                        .hasMessageContaining("required");
+                }
 
-    @Nested
-    @DisplayName("search results")
-    class SearchResults {
+                // ========== Basic Validation Tests Removed ==========
+                // Note: Jakarta Bean Validation (@NotBlank, @NotNull, @Min) handles these at controller level
+                // The following test is no longer relevant for service-layer unit tests:
+                // - rejectsMissingSource → Jakarta @NotBlank
+                
+                // We only test BUSINESS LOGIC validation in service layer
 
-        @Test
-        @DisplayName("finds direct flight")
-        void findsDirectFlight() {
-            when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
-                    .thenReturn(Optional.empty());
-            when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(180);
+                @Test
+                @DisplayName("rejects same source and destination (business rule)")
+                void rejectsSameSourceDestination() {
+                        SearchRequest request = SearchRequest.builder()
+                                        .source("DEL")
+                                        .destination("DEL")
+                                        .date(testDate)
+                                        .build();
 
-            SearchRequest request = SearchRequest.builder()
-                    .source("DEL")
-                    .destination("BLR")
-                    .date(testDate)
-                    .seats(1)
-                    .maxHops(1)
-                    .build();
+                        assertThatThrownBy(() -> searchService.searchFlights(request))
+                                        .isInstanceOf(FlightValidationException.class)
+                                        .hasMessageContaining("cannot be the same");
+                }
 
-            PageResponse<SearchResponse> results = searchService.searchFlights(request, flightGraph);
+                @Test
+                @DisplayName("rejects past date (business rule)")
+                void rejectsPastDate() {
+                        SearchRequest request = SearchRequest.builder()
+                                        .source("DEL")
+                                        .destination("BLR")
+                                        .date(LocalDate.now().minusDays(1))
+                                        .build();
 
-            assertThat(results.getContent()).hasSize(1);
-            assertThat(results.getContent().get(0).getType()).isEqualTo("DIRECT");
-            assertThat(results.getContent().get(0).getFlightIdentifier()).isEqualTo("FL101");
-            assertThat(results.getTotalElements()).isEqualTo(1);
-            assertThat(results.getTotalPages()).isEqualTo(1);
-        }
-
-        @Test
-        @DisplayName("filters by available seats")
-        void filtersBySeats() {
-            when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
-                    .thenReturn(Optional.empty());
-            when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(2);
-
-            SearchRequest request = SearchRequest.builder()
-                    .source("DEL")
-                    .destination("BLR")
-                    .date(testDate)
-                    .seats(5)
-                    .maxHops(1)
-                    .build();
-
-            PageResponse<SearchResponse> results = searchService.searchFlights(request, flightGraph);
-
-            assertThat(results.getContent()).isEmpty();
-            assertThat(results.getTotalElements()).isEqualTo(0);
+                        assertThatThrownBy(() -> searchService.searchFlights(request))
+                                        .isInstanceOf(FlightValidationException.class)
+                                        .hasMessageContaining("past");
+                }
         }
 
-        @Test
-        @DisplayName("returns empty for non-existent route")
-        void returnsEmptyForNoRoute() {
-            when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
-                    .thenReturn(Optional.empty());
+        @Nested
+        @DisplayName("search results")
+        class SearchResults {
 
-            SearchRequest request = SearchRequest.builder()
-                    .source("DEL")
-                    .destination("GOA")
-                    .date(testDate)
-                    .seats(1)
-                    .build();
+                @Test
+                @DisplayName("finds direct flight")
+                void findsDirectFlight() {
+                        when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
+                                        .thenReturn(Optional.empty());
+                        when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(180);
 
-            PageResponse<SearchResponse> results = searchService.searchFlights(request, flightGraph);
+                        SearchRequest request = SearchRequest.builder()
+                                        .source("DEL")
+                                        .destination("BLR")
+                                        .date(testDate)
+                                        .seats(1)
+                                        .maxHops(1)
+                                        .build();
 
-            assertThat(results.getContent()).isEmpty();
-            assertThat(results.getTotalElements()).isEqualTo(0);
+                        PageResponse<SearchResponse> results = searchService.searchFlights(request);
+
+                        assertThat(results.getContent()).hasSize(1);
+                        assertThat(results.getContent().get(0).getType()).isEqualTo("DIRECT");
+                        assertThat(results.getContent().get(0).getFlightIdentifier()).isEqualTo("FL101");
+                        assertThat(results.getTotalElements()).isEqualTo(1);
+                        assertThat(results.getTotalPages()).isEqualTo(1);
+                }
+
+                @Test
+                @DisplayName("filters by available seats")
+                void filtersBySeats() {
+                        when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
+                                        .thenReturn(Optional.empty());
+                        when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(2);
+
+                        SearchRequest request = SearchRequest.builder()
+                                        .source("DEL")
+                                        .destination("BLR")
+                                        .date(testDate)
+                                        .seats(5)
+                                        .maxHops(1)
+                                        .build();
+
+                        PageResponse<SearchResponse> results = searchService.searchFlights(request);
+
+                        assertThat(results.getContent()).isEmpty();
+                        assertThat(results.getTotalElements()).isEqualTo(0);
+                }
+
+                @Test
+                @DisplayName("returns empty for non-existent route")
+                void returnsEmptyForNoRoute() {
+                        when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
+                                        .thenReturn(Optional.empty());
+
+                        SearchRequest request = SearchRequest.builder()
+                                        .source("DEL")
+                                        .destination("GOA")
+                                        .date(testDate)
+                                        .seats(1)
+                                        .build();
+
+                        PageResponse<SearchResponse> results = searchService.searchFlights(request);
+
+                        assertThat(results.getContent()).isEmpty();
+                        assertThat(results.getTotalElements()).isEqualTo(0);
+                }
         }
-    }
 
-    @Nested
-    @DisplayName("getComputedFlight")
-    class GetComputedFlight {
+        @Nested
+        @DisplayName("getComputedFlight")
+        class GetComputedFlight {
 
-        @Test
-        @DisplayName("returns direct flight by ID")
-        void returnsDirectFlight() {
-            ComputedFlightEntry result = searchService.getComputedFlight("FL101", flightGraph);
+                @Test
+                @DisplayName("returns direct flight by ID")
+                void returnsDirectFlight() {
+                        ComputedFlightEntry result = searchService.getComputedFlight("FL101");
 
-            assertThat(result).isNotNull();
-            assertThat(result.getComputedFlightId()).isEqualTo("FL101");
-            assertThat(result.getNumberOfHops()).isEqualTo(1);
-            assertThat(result.getSource()).isEqualTo("DEL");
-            assertThat(result.getDestination()).isEqualTo("BLR");
+                        assertThat(result).isNotNull();
+                        assertThat(result.getComputedFlightId()).isEqualTo("FL101");
+                        assertThat(result.getNumberOfHops()).isEqualTo(1);
+                        assertThat(result.getSource()).isEqualTo("DEL");
+                        assertThat(result.getDestination()).isEqualTo("BLR");
+                }
+
+                @Test
+                @DisplayName("returns null for non-existent flight")
+                void returnsNullForNotFound() {
+                        ComputedFlightEntry result = searchService.getComputedFlight("INVALID");
+
+                        assertThat(result).isNull();
+                }
+
+                @Test
+                @DisplayName("rejects empty ID")
+                void rejectsEmptyId() {
+                        assertThatThrownBy(() -> searchService.getComputedFlight(""))
+                                        .isInstanceOf(FlightValidationException.class);
+                }
         }
-
-        @Test
-        @DisplayName("returns null for non-existent flight")
-        void returnsNullForNotFound() {
-            when(flightRepository.findByFlightId("INVALID")).thenReturn(Optional.empty());
-
-            ComputedFlightEntry result = searchService.getComputedFlight("INVALID", flightGraph);
-
-            assertThat(result).isNull();
-        }
-
-        @Test
-        @DisplayName("rejects empty ID")
-        void rejectsEmptyId() {
-            assertThatThrownBy(() -> searchService.getComputedFlight("", flightGraph))
-                    .isInstanceOf(FlightValidationException.class);
-        }
-    }
 }

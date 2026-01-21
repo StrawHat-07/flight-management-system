@@ -1,5 +1,7 @@
 package com.flightmanagement.flight.dto;
 
+import com.flightmanagement.flight.constants.FlightConstants;
+import com.flightmanagement.flight.constants.ValidationMessages;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -15,27 +17,27 @@ import java.time.LocalDate;
 @FieldDefaults(level = AccessLevel.PRIVATE)
 public class SearchRequest {
 
-    @NotBlank(message = "Source is required")
+    @NotBlank(message = ValidationMessages.SOURCE_REQUIRED)
     String source;
 
-    @NotBlank(message = "Destination is required")
+    @NotBlank(message = ValidationMessages.DESTINATION_REQUIRED)
     String destination;
 
-    @NotNull(message = "Date is required")
+    @NotNull(message = ValidationMessages.DATE_REQUIRED)
     LocalDate date;
 
-    @Min(value = 1, message = "At least 1 seat required")
+    @Min(value = FlightConstants.MIN_SEATS, message = ValidationMessages.SEATS_MIN)
     @Builder.Default
-    Integer seats = 1;
+    Integer seats = FlightConstants.DEFAULT_SEATS_PER_REQUEST;
 
     @Builder.Default
-    Integer maxHops = 3;
+    Integer maxHops = FlightConstants.DEFAULT_MAX_HOPS;
 
     @Builder.Default
-    Integer page = 0;
+    Integer page = FlightConstants.DEFAULT_PAGE_NUMBER;
 
     @Builder.Default
-    Integer size = 20;
+    Integer size = FlightConstants.DEFAULT_PAGE_SIZE;
 
     String sortBy;
 

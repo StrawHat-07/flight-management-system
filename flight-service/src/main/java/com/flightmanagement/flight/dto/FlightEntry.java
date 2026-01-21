@@ -1,6 +1,7 @@
 package com.flightmanagement.flight.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.flightmanagement.flight.constants.ValidationMessages;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -22,26 +23,26 @@ public class FlightEntry {
 
     String flightId;
 
-    @NotBlank(message = "Source is required")
+    @NotBlank(message = ValidationMessages.SOURCE_REQUIRED)
     String source;
 
-    @NotBlank(message = "Destination is required")
+    @NotBlank(message = ValidationMessages.DESTINATION_REQUIRED)
     String destination;
 
-    @NotNull(message = "Departure time is required")
+    @NotNull(message = ValidationMessages.DEPARTURE_TIME_REQUIRED)
     LocalDateTime departureTime;
 
-    @NotNull(message = "Arrival time is required")
+    @NotNull(message = ValidationMessages.ARRIVAL_TIME_REQUIRED)
     LocalDateTime arrivalTime;
 
-    @NotNull(message = "Total seats is required")
-    @Min(value = 1, message = "Total seats must be at least 1")
+    @NotNull(message = ValidationMessages.TOTAL_SEATS_REQUIRED)
+    @Min(value = 1, message = ValidationMessages.TOTAL_SEATS_MIN)
     Integer totalSeats;
 
     Integer availableSeats;
 
-    @NotNull(message = "Price is required")
-    @Min(value = 0, message = "Price must be non-negative")
+    @NotNull(message = ValidationMessages.PRICE_REQUIRED)
+    @Min(value = 0, message = ValidationMessages.PRICE_NON_NEGATIVE)
     BigDecimal price;
 
     String status;

@@ -42,6 +42,16 @@ search:
   min-connection-time-minutes: 60
   precompute-days: 7
 
+# Route precomputation configuration
+route:
+  precomputation:
+    enabled: true                              # Toggle precomputation on/off
+    cron: "0 0 */6 * * *"                     # Every 6 hours (12 AM, 6 AM, 12 PM, 6 PM)
+    max-hops: 3                                # Maximum number of hops to precompute
+    days-ahead: 7                              # Precompute routes for next N days
+    cache-ttl-hours: 24                        # Redis TTL for cached routes
+    thread-pool-size: 10                       # Bounded thread pool size
+
 # Management endpoints
 management:
   endpoints:

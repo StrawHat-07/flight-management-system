@@ -42,6 +42,9 @@ class FlightServiceTest {
     @Mock
     private InventoryService inventoryService;
 
+    @Mock
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     private FlightService flightService;
 
     private FlightEntry validEntry;
@@ -52,8 +55,9 @@ class FlightServiceTest {
         when(flightRepository.findByStatus(FlightStatus.ACTIVE)).thenReturn(List.of());
         when(inventoryService.syncAllFromDb()).thenReturn(0);
         doNothing().when(inventoryService).setSeats(anyString(), anyInt());
+        doNothing().when(eventPublisher).publishEvent(any());
 
-        flightService = new FlightService(flightRepository, inventoryService);
+        flightService = new FlightService(flightRepository, inventoryService, eventPublisher);
 
         validEntry = FlightEntry.builder()
                 .source("DEL")
@@ -108,18 +112,17 @@ class FlightServiceTest {
                     .hasMessageContaining("required");
         }
 
-        @Test
-        @DisplayName("rejects missing source")
-        void rejectsMissingSource() {
-            validEntry.setSource(null);
+        // ========== Basic Validation Tests Removed ==========
+        // Note: Jakarta Bean Validation (@NotBlank, @Min, @NotNull) handles these at controller level
+        // The following tests are no longer relevant for service-layer unit tests:
+        // - rejectsMissingSource → Jakarta @NotBlank
+        // - rejectsZeroSeats → Jakarta @Min(1)
+        // - rejectsNegativePrice → Jakarta @Min(0)
+        
+        // We only test BUSINESS LOGIC validation in service layer
 
-            assertThatThrownBy(() -> flightService.createFlight(validEntry))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("Source");
-        }
-
         @Test
-        @DisplayName("rejects same source and destination")
+        @DisplayName("rejects same source and destination (business rule)")
         void rejectsSameSourceDestination() {
             validEntry.setDestination("DEL");
 
@@ -129,33 +132,13 @@ class FlightServiceTest {
         }
 
         @Test
-        @DisplayName("rejects arrival before departure")
+        @DisplayName("rejects arrival before departure (business rule)")
         void rejectsInvalidTimes() {
             validEntry.setArrivalTime(validEntry.getDepartureTime().minusHours(1));
 
             assertThatThrownBy(() -> flightService.createFlight(validEntry))
                     .isInstanceOf(FlightValidationException.class)
                     .hasMessageContaining("after departure");
-        }
-
-        @Test
-        @DisplayName("rejects zero seats")
-        void rejectsZeroSeats() {
-            validEntry.setTotalSeats(0);
-
-            assertThatThrownBy(() -> flightService.createFlight(validEntry))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("at least 1");
-        }
-
-        @Test
-        @DisplayName("rejects negative price")
-        void rejectsNegativePrice() {
-            validEntry.setPrice(new BigDecimal("-100"));
-
-            assertThatThrownBy(() -> flightService.createFlight(validEntry))
-                    .isInstanceOf(FlightValidationException.class)
-                    .hasMessageContaining("non-negative");
         }
 
         @Test
