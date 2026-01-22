@@ -56,6 +56,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - fms-network
 
@@ -75,6 +81,7 @@ services:
       SPRING_DATA_REDIS_PORT: 6379
       FLIGHT_SERVICE_URL: http://flight-service:8081
       PAYMENT_SERVICE_URL: http://payment-service:8084
+      BOOKING_CALLBACK_URL: http://booking-service:8083/v1/bookings/payment-callback
     depends_on:
       mysql:
         condition: service_healthy
@@ -82,6 +89,12 @@ services:
         condition: service_healthy
       flight-service:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - fms-network
 
@@ -95,6 +108,12 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       BOOKING_SERVICE_URL: http://booking-service:8083
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     networks:
       - fms-network
 

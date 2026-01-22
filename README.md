@@ -1,369 +1,436 @@
 # Flight Management System
 
-A production-grade microservices-based flight management system built with Spring Boot, MySQL, and Redis.
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Flight Management System                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                       │
-│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐  │
-│  │  Flight Service │    │ Booking Service │    │ Payment Service │  │
-│  │     :8081       │    │     :8083       │    │     :8084       │  │
-│  │                 │    │                 │    │                 │  │
-│  │ • CRUD Flights  │◄───│ • Create Booking│───►│ • Process Pay   │  │
-│  │ • Graph Mgmt    │    │ • Block Seats   │    │ • Async Callback│  │
-│  │ • Search/Routes │    │ • Idempotency   │    │ • Mock Outcomes │  │
-│  └────────┬────────┘    └────────┬────────┘    └─────────────────┘  │
-│           │                      │                                    │
-│  ┌────────▼────────┐    ┌────────▼────────┐                         │
-│  │   MySQL (DB)    │    │   MySQL (DB)    │                         │
-│  │  flight_db      │    │  booking_db     │                         │
-│  └─────────────────┘    └─────────────────┘                         │
-│                                                                       │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                         Redis                                   │  │
-│  │  • Seat Counters: flight:{id}:availableSeats                   │  │
-│  │  • Blocked Seats: flight:{id}:blocked:{bookingId} (TTL: 5min)  │  │
-│  │  • Route Cache:   computed:{date}:{hops}:{src}_{dest}          │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Key Design Decisions
-
-### 1. TTL-Based Seat Rollback (No SAGA)
-Instead of implementing distributed transactions (SAGA pattern), we use Redis TTL for automatic seat rollback:
-- When booking is created, seats are atomically blocked in Redis with a 5-minute TTL
-- If payment succeeds: blocked keys are removed, MySQL is updated
-- If payment fails/times out: TTL expires, seats are automatically restored
-
-### 2. Atomic Seat Blocking
-Uses Redis Lua scripts to ensure atomic check-and-block across multiple flights (for multi-hop routes):
-
-```lua
--- Check all flights have enough seats, then block atomically
-for each flight:
-    if available < requested: return 0
-for each flight:
-    DECRBY availableKey seats
-    SET blockedKey seats EX ttl
-return 1
-```
-
-### 3. Route Precomputation
-- In-memory graph (Map<Location, List<Flight>>) for efficient route computation
-- DFS algorithm finds all valid paths up to N hops
-- Routes are cached in Redis for fast search responses
-- Background recomputation on flight changes
-
-### 4. Thread-Safe Graph Operations
-- ReadWriteLock protects the flight graph
-- CopyOnWriteArrayList for concurrent modification safety
-- Defensive copies returned to callers
-
-## Services
-
-### Flight Service (Port 8081)
-**Responsibilities:**
-- Flight CRUD operations
-- In-memory flight graph management
-- Route search and computation
-- Real-time seat availability
-
-**API Endpoints:**
-```
-# Flight Management
-POST   /v1/flights                     - Create flight
-GET    /v1/flights                     - List all flights
-GET    /v1/flights/{id}                - Get flight by ID
-PUT    /v1/flights/{id}                - Update flight
-DELETE /v1/flights/{id}                - Delete (soft) flight
-GET    /v1/flights/search?src=X&dest=Y - Search by route
-GET    /v1/flights/date/{date}         - Search by date
-GET    /v1/flights/{id}/available-seats - Get real-time seats
-
-# Search
-GET    /v1/search?src=DEL&dest=BLR&date=2026-01-25&seats=2&maxHops=2
-POST   /v1/search                      - Search via request body
-GET    /v1/search/computed/{id}        - Get computed flight details
-
-# Management
-GET    /actuator/health                - Health check
-POST   /v1/flights/trigger-recomputation - Trigger route recomputation
-```
-
-### Booking Service (Port 8083)
-**Responsibilities:**
-- Create bookings with atomic seat blocking
-- Idempotent booking creation
-- Handle payment callbacks
-- Manage booking lifecycle
-
-**API Endpoints:**
-```
-POST   /v1/bookings                    - Create booking
-POST   /v1/bookings/book/{flightId}    - Quick book endpoint
-GET    /v1/bookings/{id}               - Get booking by ID
-GET    /v1/bookings/user/{userId}      - Get user's bookings
-POST   /v1/bookings/payment-callback   - Payment service callback
-
-# Management
-GET    /actuator/health                - Health check
-```
-
-**Request Headers:**
-- `Idempotency-Key`: Optional header for idempotent requests
-
-### Payment Service (Port 8084)
-**Responsibilities:**
-- Mock payment processing
-- Async callback to booking service
-- Configurable success/failure rates
-
-**API Endpoints:**
-```
-POST   /v1/payments/process            - Process payment (async)
-POST   /v1/payments/process-sync       - Process payment (sync, for testing)
-POST   /v1/payments/process-with-outcome?outcome=SUCCESS|FAILURE|TIMEOUT
-GET    /v1/payments/{id}               - Get payment by ID
-GET    /v1/payments/booking/{bookingId} - Get payment by booking
-
-# Management
-GET    /actuator/health                - Health check
-```
+A microservices-based flight booking platform demonstrating production-grade patterns for search, booking, inventory management, and payment processing.
 
 ## Quick Start
 
 ### Prerequisites
+- Java 17+
+- Maven 3.9+
 - Docker & Docker Compose
-- Java 17+ (for local development)
-- Maven 3.8+ (for local development)
+- MySQL 8.0 (via Docker)
+- Redis 7+ (via Docker)
 
-### Running with Docker Compose
+### Option 1: Docker (Recommended)
 
 ```bash
+# Clone and navigate to project
+cd flight_management_system
+
 # Start all services
 docker-compose up -d
+
+# Verify services are running
+docker-compose ps
 
 # Check health
 curl http://localhost:8081/actuator/health  # Flight Service
 curl http://localhost:8083/actuator/health  # Booking Service
 curl http://localhost:8084/actuator/health  # Payment Service
-
-# View logs
-docker-compose logs -f
 ```
 
-### Running Locally (Development)
+### Option 2: Local Development
 
 ```bash
-# Start infrastructure
+# 1. Start infrastructure (MySQL + Redis)
 docker-compose up -d mysql redis
 
-# Start services (in separate terminals)
+# 2. Start services (in separate terminals)
 cd flight-service && mvn spring-boot:run
 cd booking-service && mvn spring-boot:run
 cd payment-service && mvn spring-boot:run
 ```
 
-## Testing
+### Service Ports
+| Service | Port | Description |
+|---------|------|-------------|
+| Flight Service | 8081 | Flights, Search, Inventory |
+| Booking Service | 8083 | Booking orchestration |
+| Payment Service | 8084 | Mock payment processing |
+| MySQL | 3306 | Persistent storage |
+| Redis | 6379 | Caching & distributed locks |
 
-### Run Unit Tests
+---
+
+## Testing the Flows
+
+### 1. Search Flights
+
 ```bash
-# All services
-cd flight-service && mvn test
-cd booking-service && mvn test
-cd payment-service && mvn test
+# Direct flight search
+curl "http://localhost:8081/v1/search?source=DEL&destination=BLR&date=2026-01-23&seats=2&maxHops=1"
+
+# Multi-hop search (connecting flights)
+curl "http://localhost:8081/v1/search?source=DEL&destination=GOI&date=2026-01-23&seats=2&maxHops=3"
+
+# Sort by price
+curl "http://localhost:8081/v1/search?source=DEL&destination=BLR&date=2026-01-23&seats=1&maxHops=3&sortBy=price&sortDirection=asc"
 ```
 
-### Run End-to-End Tests
+### 2. Create Booking (End-to-End)
+
 ```bash
-# Ensure services are running first
-./test-flows.sh
-```
+# Configure payment to succeed (for testing)
+curl -X POST http://localhost:8084/v1/mock/force-success
 
-### Manual Testing
-
-#### 1. Search for Flights
-```bash
-# Get tomorrow's date
-TOMORROW=$(date -v+1d +%Y-%m-%d 2>/dev/null || date -d '+1 day' +%Y-%m-%d)
-
-# Search direct flights
-curl "http://localhost:8081/v1/search?src=DEL&dest=BLR&date=$TOMORROW&seats=2&maxHops=1"
-
-# Search with connections
-curl "http://localhost:8081/v1/search?src=DEL&dest=MAA&date=$TOMORROW&seats=2&maxHops=3"
-```
-
-#### 2. Book a Flight
-```bash
-# Get available flight
-FLIGHT_ID=$(curl -s http://localhost:8081/v1/flights | jq -r '.[0].flightId')
-
-# Create booking with idempotency key
+# Create booking
 curl -X POST http://localhost:8083/v1/bookings \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: booking-$(date +%s)" \
-  -d '{
-    "userId": "user123",
-    "flightIdentifier": "'$FLIGHT_ID'",
-    "seats": 2
-  }'
+  -d '{"userId":"user-001","flightIdentifier":"FL201","seats":2}'
+
+# Check booking status (should be CONFIRMED after payment callback)
+curl http://localhost:8083/v1/bookings/{bookingId}
 ```
 
-#### 3. Check Booking Status
-```bash
-# Get booking (replace with actual booking ID)
-curl http://localhost:8083/v1/bookings/BK12345678
+### 3. Test Payment Failure
 
-# Get all bookings for user
-curl http://localhost:8083/v1/bookings/user/user123
-```
-
-#### 4. Test Payment Outcomes
 ```bash
-# Force successful payment
-curl -X POST "http://localhost:8084/v1/payments/process-with-outcome?outcome=SUCCESS" \
+# Configure payment to fail
+curl -X POST http://localhost:8084/v1/mock/force-failure
+
+# Create booking (will fail and release inventory)
+curl -X POST http://localhost:8083/v1/bookings \
   -H "Content-Type: application/json" \
-  -d '{"bookingId": "test-001", "userId": "user1", "amount": 299.99}'
-
-# Force failed payment
-curl -X POST "http://localhost:8084/v1/payments/process-with-outcome?outcome=FAILURE" \
-  -H "Content-Type: application/json" \
-  -d '{"bookingId": "test-002", "userId": "user1", "amount": 299.99}'
+  -d '{"userId":"user-002","flightIdentifier":"FL201","seats":2}'
 ```
 
-## Redis Key Structure
-
-| Key Pattern | Type | Description |
-|------------|------|-------------|
-| `flight:{flightId}:availableSeats` | Integer | Real-time seat counter |
-| `flight:{flightId}:blocked:{bookingId}` | Integer (TTL) | Blocked seats during payment |
-| `computed:{date}:{hops}:{src}_{dest}` | JSON Array | Cached computed routes |
-
-## Error Handling
-
-All services return consistent error responses:
-
-```json
-{
-  "error": "ERROR_CODE",
-  "message": "Human-readable message",
-  "details": { "field": "error description" },
-  "timestamp": "2026-01-20T10:30:00"
-}
-```
-
-### Common Error Codes
-
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `FLIGHT_NOT_FOUND` | 404 | Flight does not exist |
-| `BOOKING_NOT_FOUND` | 404 | Booking does not exist |
-| `VALIDATION_ERROR` | 400 | Invalid input data |
-| `NO_SEATS_AVAILABLE` | 409 | Insufficient seats |
-| `SERVICE_UNAVAILABLE` | 503 | Downstream service error |
-| `INTERNAL_ERROR` | 500 | Unexpected server error |
-
-## Design Patterns Used
-
-1. **Repository Pattern** - Data access abstraction
-2. **Service Layer Pattern** - Business logic separation
-3. **DTO Pattern** - Data transfer objects (`*Entry` suffix)
-4. **Builder Pattern** - Fluent object construction (Lombok)
-5. **Strategy Pattern** - Payment outcome determination
-6. **Observer Pattern** - Async payment callbacks
-7. **Template Method** - Global exception handling
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Service | Default | Description |
-|----------|---------|---------|-------------|
-| `SPRING_DATASOURCE_URL` | Flight, Booking | `jdbc:mysql://localhost:3306/..._db` | MySQL URL |
-| `SPRING_DATA_REDIS_HOST` | Flight, Booking | `localhost` | Redis host |
-| `FLIGHT_SERVICE_URL` | Booking | `http://localhost:8081` | Flight service URL |
-| `PAYMENT_SERVICE_URL` | Booking | `http://localhost:8084` | Payment service URL |
-| `BOOKING_SERVICE_URL` | Payment | `http://localhost:8083` | Booking service URL |
-
-### Application Properties
-
-```yaml
-# Flight Service
-search:
-  max-hops: 3
-  cache-ttl-hours: 24
-  min-connection-time-minutes: 60
-
-# Booking Service  
-booking:
-  seat-block-ttl-minutes: 5
-
-# Payment Service
-payment:
-  success-probability: 70
-  failure-probability: 20
-```
-
-## Health Checks
-
-All services expose health endpoints:
+### 4. Flight Management
 
 ```bash
-# Detailed health with dependencies
-curl http://localhost:8081/actuator/health
+# Add new flight
+curl -X POST http://localhost:8081/v1/flights \
+  -H "Content-Type: application/json" \
+  -d '{"source":"DEL","destination":"CCU","departureTime":"2026-01-25T10:00:00","arrivalTime":"2026-01-25T12:30:00","totalSeats":150,"price":5500.00}'
 
-# Response includes:
-# - Application status
-# - Database connectivity
-# - Redis connectivity (where applicable)
+# Cancel flight
+curl -X DELETE http://localhost:8081/v1/flights/{flightId}
+
+# Check inventory
+curl http://localhost:8081/v1/flights/{flightId}/available-seats
 ```
 
-## Observability
+---
 
-- **Metrics**: Available at `/actuator/metrics`
-- **Health**: Available at `/actuator/health`
-- **Info**: Available at `/actuator/info`
-- **Logging**: DEBUG level for `com.flightmanagement` package
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Client                                     │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+            │   Flight     │ │   Booking    │ │   Payment    │
+            │   Service    │ │   Service    │ │   Service    │
+            │   :8081      │ │   :8083      │ │   :8084      │
+            └──────┬───────┘ └──────┬───────┘ └──────────────┘
+                   │                │                │
+                   │     ┌──────────┴────────┐       │
+                   │     │                   │       │
+                   ▼     ▼                   ▼       │
+            ┌──────────────┐          ┌──────────────┐
+            │    MySQL     │          │    Redis     │
+            │   (flights,  │          │  (cache,     │
+            │   bookings)  │          │   locks)     │
+            └──────────────┘          └──────────────┘
+```
+
+---
+
+## Core Flows
+
+### 1. Search Flow
+
+```
+User Request → SearchController → SearchService
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                      ▼
+              Direct Flights                        Computed Routes
+              (from DB)                            (from Redis cache)
+                    │                                      │
+                    └──────────────────┬───────────────────┘
+                                       ▼
+                              Merge, Filter by Seats
+                                       │
+                                       ▼
+                              Sort (price/duration)
+                                       │
+                                       ▼
+                              Paginated Response
+```
+
+**Key Features:**
+- Multi-hop route finding using DFS algorithm
+- Precomputed routes cached in Redis (refreshed every 6 hours)
+- Seat availability filtering
+- Sorting by price or duration
+- Minimum connection time validation (60 min)
+
+### 2. Booking Flow
+
+```
+                          ┌─────────────────────────────────────┐
+                          │         Booking Service             │
+                          └─────────────────────────────────────┘
+                                          │
+    ┌─────────────────────────────────────┼─────────────────────────────────────┐
+    │                                     │                                     │
+    ▼                                     ▼                                     ▼
+┌─────────┐                        ┌─────────────┐                       ┌───────────┐
+│ Resolve │                        │   Reserve   │                       │  Initiate │
+│ Flight  │───────────────────────▶│   Seats     │──────────────────────▶│  Payment  │
+│  IDs    │                        │ (Inventory) │                       │  (Async)  │
+└─────────┘                        └─────────────┘                       └───────────┘
+    │                                     │                                     │
+    │                                     │                                     │
+    ▼                                     ▼                                     ▼
+Flight Service                    Flight Service                        Payment Service
+(GET flight IDs)                  (POST /inventory/reserve)             (POST /payments/process)
+                                          │
+                                          ▼
+                                  ┌───────────────┐
+                                  │ DB: Decrement │
+                                  │ available_seats│
+                                  └───────────────┘
+                                          │
+                                          ▼
+                                  ┌───────────────┐
+                                  │ DB: Create    │
+                                  │ seat_reservation│
+                                  └───────────────┘
+                                          │
+                                          ▼
+                                  ┌───────────────┐
+                                  │ Redis: Sync   │
+                                  │ cache         │
+                                  └───────────────┘
+```
+
+**Payment Callback:**
+```
+Payment Service ──(callback)──▶ Booking Service
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+              SUCCESS                              FAILURE
+                    │                                   │
+                    ▼                                   ▼
+        ┌───────────────────┐              ┌───────────────────┐
+        │ Confirm Inventory │              │ Release Inventory │
+        │ (soft delete      │              │ (restore seats,   │
+        │  reservation)     │              │  soft delete)     │
+        └───────────────────┘              └───────────────────┘
+                    │                                   │
+                    ▼                                   ▼
+        Booking: CONFIRMED                 Booking: FAILED
+```
+
+### 3. Inventory Management
+
+**DB-First with Redis Cache:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Inventory Operation                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │ Acquire Distributed│
+                    │ Lock (Redis)       │
+                    └───────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │ DB Transaction    │
+                    │ (UPDATE flights   │
+                    │  SET available_   │
+                    │  seats = ...)     │
+                    └───────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │ Sync Redis Cache  │
+                    │ (SET flight:seats)│
+                    └───────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │ Release Lock      │
+                    └───────────────────┘
+```
+
+**Concurrency Guarantees:**
+- Distributed locks prevent race conditions
+- DB is source of truth
+- Redis synced after every DB write
+- Soft delete for audit trail
+- Background job cleans expired reservations
+
+---
+
+## Key Design Decisions
+
+### 1. Inventory Strategy: Decrement on Reserve
+- Seats decremented immediately on reservation (not on confirm)
+- Provides accurate availability for search results
+- Released if payment fails or TTL expires
+
+### 2. Soft Delete for Reservations
+- `seat_reservations` table uses `deleted_at` timestamp
+- Enables audit trail and debugging
+- Background job marks expired reservations as deleted
+
+### 3. Mock Payment Service
+- Configurable success/failure rates
+- Runtime configuration via `/v1/mock/*` endpoints
+- Supports deterministic testing
+
+### 4. Multi-hop Route Precomputation
+- DFS algorithm finds all valid routes
+- Cached in Redis for fast retrieval
+- Refreshed every 6 hours via scheduled job
+
+---
 
 ## Project Structure
 
 ```
 flight_management_system/
-├── docker-compose.yml           # Full system orchestration
-├── test-flows.sh               # E2E test script
-├── README.md                   # This file
+├── docker-compose.yml          # Full stack orchestration
+├── flight-service/             # Flight & Inventory management
+│   ├── controller/v1/
+│   │   ├── FlightController    # CRUD operations
+│   │   ├── SearchController    # Search API
+│   │   └── InventoryController # Reserve/Confirm/Release
+│   ├── service/
+│   │   ├── SearchService       # Search logic
+│   │   ├── InventoryService    # DB operations
+│   │   ├── InventoryReservationService  # Orchestration
+│   │   ├── CacheService        # Redis operations
+│   │   └── DistributedLockService
+│   └── resources/db/migration/ # Flyway migrations
 │
-├── flight-service/
-│   ├── docker-compose.yml      # Standalone deployment
-│   ├── Dockerfile
-│   ├── pom.xml
-│   └── src/
-│       ├── main/java/com/flightmanagement/flight/
-│       │   ├── controller/v1/  # REST controllers
-│       │   ├── service/        # Business logic
-│       │   ├── repository/     # Data access
-│       │   ├── model/          # JPA entities
-│       │   ├── dto/            # DTOs (*Entry)
-│       │   ├── enums/          # Enumerations
-│       │   ├── config/         # Configuration
-│       │   └── exception/      # Exception handling
-│       └── resources/
-│           ├── application.yml
-│           └── db/migration/   # Flyway migrations
+├── booking-service/            # Booking orchestration
+│   ├── controller/v1/
+│   │   └── BookingController   # Booking API
+│   ├── service/
+│   │   ├── BookingService      # Main logic
+│   │   ├── PaymentOrchestrator # Payment coordination
+│   │   └── PricingService      # Price calculation
+│   └── client/
+│       ├── FlightServiceClient
+│       ├── InventoryClient
+│       └── PaymentServiceClient
 │
-├── booking-service/
-│   └── ... (similar structure)
-│
-└── payment-service/
-    └── ... (similar structure)
+└── payment-service/            # Mock payment gateway
+    ├── controller/v1/
+    │   ├── PaymentController   # Payment API
+    │   └── MockController      # Test configuration
+    └── service/
+        ├── PaymentService      # Processing logic
+        └── MockConfigurationService
 ```
+
+---
+
+## API Reference
+
+### Flight Service (8081)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/flights/all` | List all active flights |
+| GET | `/v1/flights/{id}` | Get flight details |
+| POST | `/v1/flights` | Create new flight |
+| DELETE | `/v1/flights/{id}` | Cancel flight |
+| GET | `/v1/search` | Search flights |
+| GET | `/v1/flights/{id}/available-seats` | Check availability |
+| POST | `/v1/inventory/reserve` | Reserve seats |
+| POST | `/v1/inventory/confirm` | Confirm reservation |
+| DELETE | `/v1/inventory/release/{bookingId}` | Release seats |
+
+### Booking Service (8083)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/v1/bookings` | Create booking |
+| GET | `/v1/bookings/{id}` | Get booking |
+| GET | `/v1/bookings/user/{userId}` | User's bookings |
+| POST | `/v1/bookings/payment-callback` | Payment webhook |
+
+### Payment Service (8084)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/v1/payments/process` | Process (async) |
+| POST | `/v1/payments/process-sync` | Process (sync) |
+| POST | `/v1/payments/process-with-outcome` | Force outcome |
+| GET | `/v1/payments/{id}` | Get payment |
+| POST | `/v1/mock/force-success` | Force all success |
+| POST | `/v1/mock/force-failure` | Force all failure |
+| POST | `/v1/mock/reset` | Reset to defaults |
+
+---
+
+## Testing
+
+### Run Unit Tests
+```bash
+cd flight-service && mvn test
+cd booking-service && mvn test
+cd payment-service && mvn test
+```
+
+### E2E Test Script
+```bash
+# 1. Ensure services are running
+# 2. Configure payment for success
+curl -X POST http://localhost:8084/v1/mock/force-success
+
+# 3. Search for flights
+curl "http://localhost:8081/v1/search?source=DEL&destination=BLR&date=2026-01-23&seats=2"
+
+# 4. Create booking
+curl -X POST http://localhost:8083/v1/bookings \
+  -H "Content-Type: application/json" \
+  -d '{"userId":"test-user","flightIdentifier":"FL201","seats":2}'
+
+# 5. Verify booking confirmed
+curl http://localhost:8083/v1/bookings/{bookingId}
+
+# 6. Check inventory decreased
+curl http://localhost:8081/v1/flights/FL201/available-seats
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Service | Default |
+|----------|---------|---------|
+| `SPRING_DATASOURCE_URL` | flight, booking | jdbc:mysql://localhost:3306/... |
+| `SPRING_DATA_REDIS_HOST` | flight, booking | localhost |
+| `FLIGHT_SERVICE_URL` | booking | http://localhost:8081 |
+| `PAYMENT_SERVICE_URL` | booking | http://localhost:8084 |
+| `BOOKING_SERVICE_URL` | payment | http://localhost:8083 |
+
+---
+
+## Technologies
+
+- **Java 17** + Spring Boot 3.x
+- **MySQL 8.0** - Persistent storage
+- **Redis 7** - Caching & distributed locks
+- **Flyway** - Database migrations
+- **Docker** - Containerization
+- **Maven** - Build tool
+
+---
 
 ## License
 
-This project is for demonstration purposes.
+MIT License
