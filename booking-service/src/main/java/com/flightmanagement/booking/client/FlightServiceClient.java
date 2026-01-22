@@ -72,20 +72,6 @@ public class FlightServiceClient {
     }
 
 
-    public boolean decrementSeats(String flightId, int seats) {
-        String url = flightServiceUrl + "/v1/flights/" + flightId + "/decrement-seats?seats=" + seats;
-        log.debug("Calling flight service: POST {}", url);
-
-        try {
-            restTemplate.postForEntity(url, null, Void.class);
-            return true;
-        } catch (Exception e) {
-            log.error("Failed to decrement seats for flight {}: {}", flightId, e.getMessage());
-            return false;
-        }
-    }
-
-
     public List<String> getFlightIds(String flightIdentifier) {
         if (!flightIdentifier.startsWith("CF_")) {
             // Direct flight
