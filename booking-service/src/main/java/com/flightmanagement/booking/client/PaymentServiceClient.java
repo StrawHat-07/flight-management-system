@@ -27,9 +27,6 @@ public class PaymentServiceClient {
     @Value("${booking-service.callback-url:http://booking-service:8083/v1/bookings/payment-callback}")
     String callbackUrl;
 
-    /**
-     * Initiates payment processing asynchronously.
-     */
     @Async
     public void initiatePayment(String bookingId, String userId, java.math.BigDecimal amount) {
         log.info("Initiating payment for booking {}", bookingId);
