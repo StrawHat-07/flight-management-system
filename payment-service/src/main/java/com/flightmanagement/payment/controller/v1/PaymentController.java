@@ -16,6 +16,7 @@ import java.util.Map;
 
 /**
  * REST controller for payment operations.
+ * Provides both async (production-like) and sync (testing) endpoints.
  */
 @Slf4j
 @RestController
@@ -26,10 +27,6 @@ public class PaymentController {
 
     PaymentService paymentService;
 
-    /**
-     * Processes payment asynchronously.
-     * POST /v1/payments/process
-     */
     @PostMapping("/process")
     public ResponseEntity<Map<String, String>> processPayment(@Valid @RequestBody PaymentRequest request) {
         log.info("POST /v1/payments/process - bookingId={}", request.getBookingId());
@@ -39,15 +36,12 @@ public class PaymentController {
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(Map.of(
                         "status", "PROCESSING",
-                        "message", "Payment is being processed",
+                        "message", "Payment is being processed. Result will be sent to callback URL.",
                         "bookingId", request.getBookingId()
                 ));
     }
 
-    /**
-     * Processes payment synchronously (for testing).
-     * POST /v1/payments/process-sync
-     */
+
     @PostMapping("/process-sync")
     public ResponseEntity<PaymentEntry> processPaymentSync(@Valid @RequestBody PaymentRequest request) {
         log.info("POST /v1/payments/process-sync - bookingId={}", request.getBookingId());
@@ -56,10 +50,6 @@ public class PaymentController {
         return ResponseEntity.ok(entry);
     }
 
-    /**
-     * Processes payment with forced outcome (for testing).
-     * POST /v1/payments/process-with-outcome?outcome=SUCCESS
-     */
     @PostMapping("/process-with-outcome")
     public ResponseEntity<PaymentEntry> processPaymentWithOutcome(
             @Valid @RequestBody PaymentRequest request,
@@ -72,35 +62,21 @@ public class PaymentController {
         return ResponseEntity.ok(entry);
     }
 
-    /**
-     * Gets payment by ID.
-     * GET /v1/payments/{paymentId}
-     */
     @GetMapping("/{paymentId}")
     public ResponseEntity<PaymentEntry> findById(@PathVariable String paymentId) {
         log.debug("GET /v1/payments/{}", paymentId);
 
-        PaymentEntry entry = paymentService.findById(paymentId);
-        if (entry == null) {
-            return ResponseEntity.notFound().build();
-        }
-
-        return ResponseEntity.ok(entry);
+        return paymentService.findById(paymentId)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 
-    /**
-     * Gets payment by booking ID.
-     * GET /v1/payments/booking/{bookingId}
-     */
     @GetMapping("/booking/{bookingId}")
     public ResponseEntity<PaymentEntry> findByBooking(@PathVariable String bookingId) {
         log.debug("GET /v1/payments/booking/{}", bookingId);
 
-        PaymentEntry entry = paymentService.findByBookingId(bookingId);
-        if (entry == null) {
-            return ResponseEntity.notFound().build();
-        }
-
-        return ResponseEntity.ok(entry);
+        return paymentService.findByBookingId(bookingId)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 }

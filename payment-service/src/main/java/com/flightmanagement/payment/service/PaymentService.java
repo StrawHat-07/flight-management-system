@@ -5,201 +5,189 @@ import com.flightmanagement.payment.dto.PaymentCallback;
 import com.flightmanagement.payment.dto.PaymentEntry;
 import com.flightmanagement.payment.dto.PaymentRequest;
 import com.flightmanagement.payment.enums.PaymentStatus;
-import lombok.AccessLevel;
+import com.flightmanagement.payment.service.callback.CallbackSender;
+import com.flightmanagement.payment.service.repository.PaymentRepository;
 import lombok.RequiredArgsConstructor;
-import lombok.experimental.FieldDefaults;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
-import java.util.Map;
-import java.util.Random;
+import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Mock payment service for simulating payment processing.
+ * Payment orchestration service.
+ * Coordinates payment processing, storage, and callbacks.
  * 
- * Staff Engineer Design:
- * - Configurable success/failure rates for testing
- * - Async processing with callbacks
- * - Deterministic outcomes for testing (forced outcome)
- * - In-memory storage (would be DB in production)
+ * Design principles:
+ * - Delegates to specialized components (SRP)
+ * - Depends on abstractions (DIP)
+ * - Idempotent operations
+ * - Mock-friendly for E2E testing
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
-@FieldDefaults(level = AccessLevel.PRIVATE)
 public class PaymentService {
 
-    final RestTemplate restTemplate;
-
-    @Value("${booking-service.url}")
-    String bookingServiceUrl;
-
-    @Value("${payment.success-probability:" + PaymentConstants.DEFAULT_SUCCESS_PROBABILITY + "}")
-    int successProbability;
-
-    @Value("${payment.failure-probability:" + PaymentConstants.DEFAULT_FAILURE_PROBABILITY + "}")
-    int failureProbability;
-
-    @Value("${payment.min-processing-delay-ms:" + PaymentConstants.DEFAULT_MIN_PROCESSING_DELAY_MS + "}")
-    int minProcessingDelay;
-
-    @Value("${payment.max-processing-delay-ms:" + PaymentConstants.DEFAULT_MAX_PROCESSING_DELAY_MS + "}")
-    int maxProcessingDelay;
-
-    final Random random = new Random();
-
-    // In-memory storage for demo (would be DB in production)
-    final Map<String, PaymentEntry> payments = new ConcurrentHashMap<>();
+    private final PaymentRepository paymentRepository;
+    private final CallbackSender callbackSender;
+    private final MockConfigurationService mockConfig;
 
     /**
      * Processes payment asynchronously.
-     * Simulates processing delay and random outcome.
+     * Simulates processing delay and sends callback.
      */
     @Async
     public void processPaymentAsync(PaymentRequest request) {
-        String paymentId = generatePaymentId();
+        log.info("Processing payment async: bookingId={}, amount={}",
+                request.getBookingId(), request.getAmount());
 
-        log.info("Processing payment: id={}, bookingId={}, amount={}",
-                paymentId, request.getBookingId(), request.getAmount());
+        // Idempotency check
+        Optional<PaymentEntry> existing = paymentRepository.findByBookingId(request.getBookingId());
+        if (existing.isPresent()) {
+            log.info("Idempotent request - payment already exists: {}", existing.get().getPaymentId());
+            sendCallbackIfNeeded(request.getCallbackUrl(), existing.get());
+            return;
+        }
 
-        // Simulate processing time
+        // Simulate processing
         simulateProcessingDelay();
-
-        // Determine outcome
-        PaymentStatus status = determineOutcome();
-        String message = getStatusMessage(status);
-
-        PaymentEntry entry = PaymentEntry.builder()
-                .paymentId(paymentId)
-                .bookingId(request.getBookingId())
-                .userId(request.getUserId())
-                .amount(request.getAmount())
-                .status(status.name())
-                .message(message)
-                .processedAt(LocalDateTime.now())
-                .build();
-
-        payments.put(paymentId, entry);
-
-        log.info("Payment completed: id={}, status={}", paymentId, status);
-
-        // Send callback
-        sendCallback(request.getCallbackUrl(), paymentId, request.getBookingId(), status, message);
+        PaymentEntry entry = processAndSave(request, null);
+        sendCallbackIfNeeded(request.getCallbackUrl(), entry);
     }
 
     /**
-     * Processes payment synchronously (for testing).
+     * Processes payment synchronously.
+     * Used for testing when immediate response is needed.
      */
     public PaymentEntry processPaymentSync(PaymentRequest request) {
-        String paymentId = generatePaymentId();
+        log.info("Processing payment sync: bookingId={}, amount={}",
+                request.getBookingId(), request.getAmount());
 
-        log.info("Processing payment (sync): paymentId={}, bookingId={}, amount={}", 
-                paymentId, request.getBookingId(), request.getAmount());
-
-        // Shorter delay for sync
-        try {
-            int delay = random.nextInt(PaymentConstants.SYNC_PROCESSING_MAX_DELAY_MS 
-                            - PaymentConstants.SYNC_PROCESSING_MIN_DELAY_MS) 
-                    + PaymentConstants.SYNC_PROCESSING_MIN_DELAY_MS;
-            Thread.sleep(delay);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // Idempotency check
+        Optional<PaymentEntry> existing = paymentRepository.findByBookingId(request.getBookingId());
+        if (existing.isPresent()) {
+            log.info("Idempotent request - returning existing payment: {}", existing.get().getPaymentId());
+            return existing.get();
         }
 
-        PaymentStatus status = determineOutcome();
-        String message = getStatusMessage(status);
+        // Shorter delay for sync
+        int delay = mockConfig.getProcessingDelay() / 3;
+        if (delay > 0) {
+            sleep(Math.min(delay, 1500));
+        }
 
-        PaymentEntry entry = PaymentEntry.builder()
-                .paymentId(paymentId)
-                .bookingId(request.getBookingId())
-                .userId(request.getUserId())
-                .amount(request.getAmount())
-                .status(status.name())
-                .message(message)
-                .processedAt(LocalDateTime.now())
-                .build();
+        // Process and save
+        PaymentEntry entry = processAndSave(request, null);
+        if (StringUtils.hasText(request.getCallbackUrl())) {
+            sendCallbackIfNeeded(request.getCallbackUrl(), entry);
+        }
 
-        payments.put(paymentId, entry);
+        return entry;
+    }
+
+    /**
+     * Processes payment with forced outcome.
+     * Used for deterministic testing scenarios.
+     */
+    public PaymentEntry processPaymentWithOutcome(PaymentRequest request, String forcedOutcome) {
+        log.info("Processing payment with forced outcome: bookingId={}, outcome={}",
+                request.getBookingId(), forcedOutcome);
+
+        // Idempotency check
+        Optional<PaymentEntry> existing = paymentRepository.findByBookingId(request.getBookingId());
+        if (existing.isPresent()) {
+            log.info("Idempotent request - returning existing payment: {}", existing.get().getPaymentId());
+            return existing.get();
+        }
+
+        // Process with forced outcome
+        PaymentEntry entry = processAndSave(request, forcedOutcome);
 
         // Send callback if URL provided
         if (StringUtils.hasText(request.getCallbackUrl())) {
-            sendCallback(request.getCallbackUrl(), paymentId, request.getBookingId(), status, message);
+            sendCallbackIfNeeded(request.getCallbackUrl(), entry);
         }
 
         return entry;
     }
 
     /**
-     * Processes payment with forced outcome (for testing).
+     * Finds payment by payment ID.
      */
-    public PaymentEntry processPaymentWithOutcome(PaymentRequest request, String forcedOutcome) {
-        String paymentId = generatePaymentId();
-
-        PaymentStatus status;
-        try {
-            status = PaymentStatus.valueOf(forcedOutcome.toUpperCase());
-        } catch (IllegalArgumentException e) {
-            status = PaymentStatus.FAILURE;
-        }
-
-        String message = getStatusMessage(status);
-
-        log.info("Processing payment with forced outcome: id={}, status={}", paymentId, status);
-
-        PaymentEntry entry = PaymentEntry.builder()
-                .paymentId(paymentId)
-                .bookingId(request.getBookingId())
-                .userId(request.getUserId())
-                .amount(request.getAmount())
-                .status(status.name())
-                .message(message)
-                .processedAt(LocalDateTime.now())
-                .build();
-
-        payments.put(paymentId, entry);
-
-        if (StringUtils.hasText(request.getCallbackUrl())) {
-            sendCallback(request.getCallbackUrl(), paymentId, request.getBookingId(), status, message);
-        }
-
-        return entry;
-    }
-
-    /**
-     * Finds payment by ID.
-     */
-    public PaymentEntry findById(String paymentId) {
-        return payments.get(paymentId);
+    public Optional<PaymentEntry> findById(String paymentId) {
+        return paymentRepository.findById(paymentId);
     }
 
     /**
      * Finds payment by booking ID.
      */
-    public PaymentEntry findByBookingId(String bookingId) {
-        return payments.values().stream()
-                .filter(p -> p.getBookingId().equals(bookingId))
-                .findFirst()
-                .orElse(null);
+    public Optional<PaymentEntry> findByBookingId(String bookingId) {
+        return paymentRepository.findByBookingId(bookingId);
     }
 
     // ============ Private Methods ============
 
-    private PaymentStatus determineOutcome() {
-        int roll = random.nextInt(100);
+    private PaymentEntry processAndSave(PaymentRequest request, String forcedOutcome) {
+        String paymentId = generatePaymentId();
 
-        if (roll < successProbability) {
-            return PaymentStatus.SUCCESS;
-        } else if (roll < successProbability + failureProbability) {
-            return PaymentStatus.FAILURE;
+        PaymentStatus status;
+        if (forcedOutcome != null) {
+            try {
+                status = PaymentStatus.valueOf(forcedOutcome.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid forced outcome '{}', using configured behavior", forcedOutcome);
+                status = mockConfig.determineOutcome();
+            }
         } else {
-            return PaymentStatus.TIMEOUT;
+            status = mockConfig.determineOutcome();
+        }
+
+        String message = getStatusMessage(status);
+
+        PaymentEntry entry = PaymentEntry.builder()
+                .paymentId(paymentId)
+                .bookingId(request.getBookingId())
+                .userId(request.getUserId())
+                .amount(request.getAmount())
+                .status(status.name())
+                .message(message)
+                .processedAt(LocalDateTime.now())
+                .build();
+
+        paymentRepository.save(entry);
+        log.info("Payment processed: id={}, status={}", paymentId, status);
+
+        return entry;
+    }
+
+    private void sendCallbackIfNeeded(String callbackUrl, PaymentEntry entry) {
+        PaymentCallback callback = PaymentCallback.builder()
+                .bookingId(entry.getBookingId())
+                .paymentId(entry.getPaymentId())
+                .status(entry.getStatus())
+                .message(entry.getMessage())
+                .build();
+
+        callbackSender.sendWithRetry(callbackUrl, callback);
+    }
+
+    private void simulateProcessingDelay() {
+        int delay = mockConfig.getProcessingDelay();
+        if (delay > 0) {
+            sleep(delay);
+        }
+    }
+
+    private void sleep(int ms) {
+        try {
+            log.debug("Simulating delay: {}ms", ms);
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -211,50 +199,8 @@ public class PaymentService {
         };
     }
 
-    private void simulateProcessingDelay() {
-        try {
-            int delay = random.nextInt(maxProcessingDelay - minProcessingDelay) + minProcessingDelay;
-            log.debug("Simulating processing delay: {}ms", delay);
-            Thread.sleep(delay);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private void sendCallback(String callbackUrl, String paymentId, String bookingId,
-                              PaymentStatus status, String message) {
-        if (!StringUtils.hasText(callbackUrl)) {
-            log.warn("No callback URL provided for payment {}", paymentId);
-            return;
-        }
-
-        PaymentCallback callback = PaymentCallback.builder()
-                .bookingId(bookingId)
-                .paymentId(paymentId)
-                .status(status.name())
-                .message(message)
-                .build();
-
-        try {
-            log.info("Sending callback to {} for payment {}", callbackUrl, paymentId);
-            restTemplate.postForEntity(callbackUrl, callback, String.class);
-            log.info("Callback sent successfully for payment {}", paymentId);
-        } catch (Exception e) {
-            log.error("Failed to send callback for payment {}: {}", paymentId, e.getMessage());
-
-            // Retry with default URL
-            try {
-                String defaultUrl = bookingServiceUrl + "/v1/bookings/payment-callback";
-                log.info("Retrying callback to {}", defaultUrl);
-                restTemplate.postForEntity(defaultUrl, callback, String.class);
-            } catch (Exception retryEx) {
-                log.error("Callback retry failed for payment {}: {}", paymentId, retryEx.getMessage());
-            }
-        }
-    }
-
     private String generatePaymentId() {
-        return PaymentConstants.PAYMENT_ID_PREFIX 
+        return PaymentConstants.PAYMENT_ID_PREFIX
                 + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
     }
 }
