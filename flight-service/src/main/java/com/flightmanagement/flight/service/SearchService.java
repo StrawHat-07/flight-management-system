@@ -18,24 +18,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 /**
  * Flight search service.
- * 
- * Single Responsibility: Search ONLY
- * - Reads from Redis cache (precomputed routes)
- * - Fallback to real-time computation if cache miss
- * - Real-time seat availability checks
- * - Sorting and pagination
- * 
- * Staff Engineer Design:
- * - Gets graph from FlightGraphService (no parameter passing)
- * - Redis-first (fast path)
- * - Graceful degradation (computes on miss, doesn't fail)
- * - No repository access (uses FlightGraphService)
  */
 @Service
 @Slf4j
@@ -43,25 +29,25 @@ public class SearchService {
 
     private final FlightGraphService graphService;
     private final CacheService cacheService;
+    private final RouteFinderService routeFinderService;
     private final ObjectMapper objectMapper;
 
     private final int maxHops;
     private final int cacheTtlHours;
-    private final int minConnectionMinutes;
 
     public SearchService(
             FlightGraphService graphService,
             CacheService cacheService,
+            RouteFinderService routeFinderService,
             ObjectMapper objectMapper,
             @Value("${search.max-hops:3}") int maxHops,
-            @Value("${search.cache-ttl-hours:24}") int cacheTtlHours,
-            @Value("${search.min-connection-time-minutes:60}") int minConnectionMinutes) {
+            @Value("${search.cache-ttl-hours:24}") int cacheTtlHours) {
         this.graphService = graphService;
         this.cacheService = cacheService;
+        this.routeFinderService = routeFinderService;
         this.objectMapper = objectMapper;
         this.maxHops = maxHops;
         this.cacheTtlHours = cacheTtlHours;
-        this.minConnectionMinutes = minConnectionMinutes;
     }
 
     /**
@@ -95,7 +81,6 @@ public class SearchService {
             List<ComputedFlightEntry> routes = findRoutes(source, destination, date, hops);
 
             for (ComputedFlightEntry route : routes) {
-                // Real-time seat availability check
                 int available = cacheService.getMinSeatsAcrossFlights(route.getFlightIds());
                 if (available >= seats) {
                     allResults.add(SearchMapper.toSearchResponse(route, hops, available));
@@ -160,77 +145,19 @@ public class SearchService {
             }
         }
 
-        // Cache miss: compute in real-time (fallback)
+        // Cache miss: compute in real-time using shared RouteFinderService
         log.debug("Cache miss: date={}, hops={}, {}->{}, computing...", date, hops, source, destination);
 
         Map<String, List<Flight>> graph = graphService.getGraphSnapshot();
-        List<ComputedFlightEntry> computed = computeRoutes(source, destination, date, hops, graph);
+        List<ComputedFlightEntry> computed = routeFinderService.findRoutes(source, destination, date, hops, graph);
 
         if (!computed.isEmpty()) {
-            // Cache for future requests
             cacheService.cacheRoutes(dateStr, hops, source, destination, computed, cacheTtlHours);
             log.debug("Computed and cached {} routes: {}->{} on {} ({} hops)",
                     computed.size(), source, destination, date, hops);
         }
 
         return computed;
-    }
-
-    private List<ComputedFlightEntry> computeRoutes(String source, String destination, LocalDate date,
-            int exactHops, Map<String, List<Flight>> flightGraph) {
-        List<List<Flight>> paths = new ArrayList<>();
-        List<Flight> currentPath = new ArrayList<>();
-        Set<String> visited = new HashSet<>();
-
-        findPaths(source, destination, date, exactHops, currentPath, visited, paths, null, flightGraph);
-
-        List<ComputedFlightEntry> results = new ArrayList<>(paths.size());
-        for (List<Flight> path : paths) {
-            ComputedFlightEntry entry = SearchMapper.toComputedEntry(path);
-            if (entry != null) {
-                results.add(entry);
-            }
-        }
-        return results;
-    }
-
-    private void findPaths(String current, String destination, LocalDate date, int remainingHops,
-            List<Flight> path, Set<String> visited, List<List<Flight>> results,
-            LocalDateTime minDeparture, Map<String, List<Flight>> graph) {
-
-        if (remainingHops == 0) {
-            if (current.equals(destination)) {
-                results.add(new ArrayList<>(path));
-            }
-            return;
-        }
-
-        if (visited.contains(current)) {
-            return;
-        }
-        visited.add(current);
-
-        List<Flight> outbound = graph.getOrDefault(current, Collections.emptyList());
-
-        for (Flight flight : outbound) {
-            if (!flight.getDepartureTime().toLocalDate().equals(date)) {
-                continue;
-            }
-
-            if (minDeparture != null) {
-                long gap = ChronoUnit.MINUTES.between(minDeparture, flight.getDepartureTime());
-                if (gap < minConnectionMinutes) {
-                    continue;
-                }
-            }
-
-            path.add(flight);
-            findPaths(flight.getDestination(), destination, date, remainingHops - 1, path, visited,
-                    results, flight.getArrivalTime(), graph);
-            path.remove(path.size() - 1);
-        }
-
-        visited.remove(current);
     }
 
     private ComputedFlightEntry findDirectFlight(String flightId, Map<String, List<Flight>> graph) {

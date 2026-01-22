@@ -32,19 +32,21 @@ public class FlightServiceClient {
 
     public Optional<FlightEntry> getFlightById(String flightId) {
         String url = flightServiceUrl + "/v1/flights/" + flightId;
-        log.debug("Calling flight service: GET {}", url);
+        log.info("Calling flight service: GET {}", url);
 
         try {
             ResponseEntity<FlightEntry> response = restTemplate.getForEntity(url, FlightEntry.class);
+            log.info("Flight service response: status={}", response.getStatusCode());
             return Optional.ofNullable(response.getBody());
         } catch (HttpClientErrorException.NotFound e) {
             log.warn("Flight not found: {}", flightId);
             return Optional.empty();
         } catch (ResourceAccessException e) {
-            log.error("Flight service unavailable: {}", e.getMessage());
+            log.error("Flight service unavailable: {}", e.getMessage(), e);
             throw new ServiceUnavailableException("Flight service unavailable");
         } catch (Exception e) {
-            log.error("Error calling flight service: {}", e.getMessage());
+            log.error("Error calling flight service: type={}, message={}", 
+                    e.getClass().getName(), e.getMessage(), e);
             throw new ServiceUnavailableException("Error communicating with flight service");
         }
     }

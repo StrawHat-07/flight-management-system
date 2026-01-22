@@ -43,7 +43,7 @@ payment-service:
   url: ${PAYMENT_SERVICE_URL:http://localhost:8084}
 
 booking-service:
-  callback-url: ${BOOKING_CALLBACK_URL:http://booking-service:8083/v1/bookings/payment-callback}
+  callback-url: ${BOOKING_CALLBACK_URL:http://localhost:8083/v1/bookings/payment-callback}
 
 # HTTP client configuration
 http:

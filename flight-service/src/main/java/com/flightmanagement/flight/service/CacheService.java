@@ -1,5 +1,6 @@
 package com.flightmanagement.flight.service;
 
+import com.flightmanagement.flight.service.cache.SeatCacheOperations;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -9,17 +10,17 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-
 @Service
 @RequiredArgsConstructor
 @Slf4j
-public class CacheService {
+public class CacheService implements SeatCacheOperations {
 
     private static final String SEATS_KEY_PATTERN = "flight:%s:availableSeats";
-    private static final String COMPUTED_ROUTES_KEY_PATTERN = "computed:%s:%d:%s_%s"; // date:hops:src_dest
+    private static final String COMPUTED_ROUTES_KEY_PATTERN = "computed:%s:%d:%s_%s";
 
     private final RedisTemplate<String, Object> redisTemplate;
 
+    @Override
     public void setSeats(String flightId, int seats) {
         String key = formatSeatsKey(flightId);
         try {
@@ -30,6 +31,7 @@ public class CacheService {
         }
     }
 
+    @Override
     public Optional<Integer> getSeats(String flightId) {
         String key = formatSeatsKey(flightId);
         try {
@@ -43,6 +45,7 @@ public class CacheService {
         return Optional.empty();
     }
 
+    @Override
     public void deleteSeats(String flightId) {
         String key = formatSeatsKey(flightId);
         try {
@@ -53,7 +56,7 @@ public class CacheService {
         }
     }
 
-
+    @Override
     public void decrementSeats(String flightId, int count) {
         String key = formatSeatsKey(flightId);
         try {
@@ -64,6 +67,7 @@ public class CacheService {
         }
     }
 
+    @Override
     public void incrementSeats(String flightId, int count) {
         String key = formatSeatsKey(flightId);
         try {
@@ -74,9 +78,9 @@ public class CacheService {
         }
     }
 
+    @Override
     public int getMinSeatsAcrossFlights(List<String> flightIds) {
         int minSeats = Integer.MAX_VALUE;
-
         for (String flightId : flightIds) {
             Optional<Integer> seats = getSeats(flightId);
             if (seats.isEmpty()) {
@@ -84,12 +88,11 @@ public class CacheService {
             }
             minSeats = Math.min(minSeats, seats.get());
         }
-
         return minSeats == Integer.MAX_VALUE ? 0 : minSeats;
     }
 
-    public void cacheRoutes(String date, int hops, String src, String dest, 
-                           Object routes, int ttlHours) {
+    public void cacheRoutes(String date, int hops, String src, String dest,
+            Object routes, int ttlHours) {
         String key = formatRoutesKey(date, hops, src, dest);
         try {
             redisTemplate.opsForValue().set(key, routes, ttlHours, TimeUnit.HOURS);

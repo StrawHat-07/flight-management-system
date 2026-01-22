@@ -85,12 +85,6 @@ public class FlightGraphService {
         eventPublisher.publishEvent(new GraphRebuildEvent(this, locationCount, flightCount));
     }
 
-    /**
-     * Returns immutable snapshot of flight graph.
-     * Used by SearchService and RoutePrecomputationService.
-     * 
-     * Thread-safe: Uses read lock.
-     */
     public Map<String, List<Flight>> getGraphSnapshot() {
         graphLock.readLock().lock();
         try {
@@ -104,10 +98,6 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Returns all active locations (sources and destinations).
-     * Used by RoutePrecomputationService for precomputing all pairs.
-     */
     public Set<String> getActiveLocations() {
         graphLock.readLock().lock();
         try {
@@ -126,10 +116,6 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Returns number of source locations in graph.
-     * Used for metrics and logging.
-     */
     public int getLocationCount() {
         graphLock.readLock().lock();
         try {
@@ -139,10 +125,7 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Returns total number of flights in graph.
-     * Used for metrics and logging.
-     */
+
     public int getTotalFlightCount() {
         graphLock.readLock().lock();
         try {
@@ -154,14 +137,6 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Rebuilds entire graph from database.
-     * 
-     * Used ONLY on startup. For runtime updates, use incremental methods.
-     * 
-     * Thread-safe: Uses write lock.
-     * Gets data from FlightService (doesn't access repository directly).
-     */
     public void rebuildGraph() {
         graphLock.writeLock().lock();
         try {
@@ -189,18 +164,12 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Adds or updates a single flight in the graph (incremental update).
-     * 
-     * Performance: O(1) - only updates affected flights
-     * Thread-safe: Uses write lock
-     */
+
     private void addOrUpdateFlight(Flight flight) {
         graphLock.writeLock().lock();
         try {
             String source = flight.getSource();
-            
-            // Remove old version if exists (for updates)
+
             List<Flight> flights = flightGraph.get(source);
             if (flights != null) {
                 flights.removeIf(f -> f.getFlightId().equals(flight.getFlightId()));
@@ -217,12 +186,6 @@ public class FlightGraphService {
         }
     }
 
-    /**
-     * Removes a flight from the graph (incremental update).
-     * 
-     * Performance: O(1) - only removes one flight
-     * Thread-safe: Uses write lock
-     */
     private void removeFlight(Flight flight) {
         graphLock.writeLock().lock();
         try {
@@ -231,8 +194,7 @@ public class FlightGraphService {
             
             if (flights != null) {
                 flights.removeIf(f -> f.getFlightId().equals(flight.getFlightId()));
-                
-                // Remove source key if no more flights
+
                 if (flights.isEmpty()) {
                     flightGraph.remove(source);
                 }

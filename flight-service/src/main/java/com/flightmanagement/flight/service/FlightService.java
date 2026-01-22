@@ -30,13 +30,6 @@ import java.util.List;
 
 /**
  * Flight CRUD operations.
- * 
- * Single Responsibility: Flight data management ONLY
- * - CRUD operations (create, read, update, cancel)
- * - ONLY service with FlightRepository access (Repository Pattern)
- * - Publishes events for graph/cache updates
- * - NO graph management (moved to FlightGraphService)
- * - NO search logic (in SearchService)
  */
 @Service
 @Slf4j
@@ -62,7 +55,6 @@ public class FlightService {
         log.info("FlightService initialized: {} flights synced to cache", synced);
     }
 
-    // ========== CRUD Operations ==========
 
     @Transactional
     public FlightEntry createFlight(FlightEntry request) {
@@ -124,7 +116,6 @@ public class FlightService {
         log.info("Cancelled flight: id={}", flightId);
     }
 
-    // ========== Query Operations ==========
 
     public FlightEntry getFlightById(String flightId) {
         FlightValidator.validateFlightId(flightId);
@@ -148,8 +139,6 @@ public class FlightService {
     }
 
     public List<FlightEntry> getFlightsByRoute(String source, String destination) {
-        // Note: Basic null/empty checks done at controller level via @RequestParam(required=true)
-        // We just normalize and query
         List<Flight> flights = flightRepository.findBySourceAndDestinationAndStatus(
                 com.flightmanagement.flight.util.StringUtils.normalizeLocation(source),
                 com.flightmanagement.flight.util.StringUtils.normalizeLocation(destination),
@@ -158,8 +147,6 @@ public class FlightService {
     }
 
     public List<FlightEntry> getFlightsByDate(LocalDate date) {
-        // Note: Basic null check done at controller level via @PathVariable
-        // We just compute start/end times and query
         LocalDateTime dayStart = DateTimeUtils.startOfDay(date);
         LocalDateTime dayEnd = DateTimeUtils.endOfDay(date);
 
@@ -168,7 +155,7 @@ public class FlightService {
         return FlightMapper.toEntryList(flights);
     }
 
-    // ========== Seat Management ==========
+
 
     public int getAvailableSeats(String flightId) {
         FlightValidator.validateFlightId(flightId);

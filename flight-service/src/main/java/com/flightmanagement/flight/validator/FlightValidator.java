@@ -39,7 +39,7 @@ public final class FlightValidator {
 
     public static void validateArrivalAfterDeparture(LocalDateTime departureTime, LocalDateTime arrivalTime) {
         if (departureTime == null || arrivalTime == null) {
-            return; // Jakarta @NotNull handles null checks
+            return;
         }
 
         if (!arrivalTime.isAfter(departureTime)) {

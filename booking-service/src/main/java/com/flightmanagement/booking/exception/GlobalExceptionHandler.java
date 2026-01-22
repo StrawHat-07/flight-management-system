@@ -12,9 +12,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Global exception handler for booking service.
- */
+
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
@@ -69,9 +67,7 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of("INTERNAL_ERROR", "An unexpected error occurred"));
     }
 
-    /**
-     * Standard error response structure.
-     */
+
     public record ErrorResponse(
             String error,
             String message,

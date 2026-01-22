@@ -5,6 +5,7 @@ import com.flightmanagement.booking.model.Booking;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -18,4 +19,6 @@ public interface BookingRepository extends JpaRepository<Booking, String> {
     List<Booking> findByStatus(BookingStatus status);
 
     List<Booking> findByFlightIdentifier(String flightIdentifier);
+
+    List<Booking> findByStatusAndCreatedAtBefore(BookingStatus status, LocalDateTime createdAt);
 }

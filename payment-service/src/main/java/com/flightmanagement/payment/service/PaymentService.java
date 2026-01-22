@@ -1,5 +1,6 @@
 package com.flightmanagement.payment.service;
 
+import com.flightmanagement.payment.constants.PaymentConstants;
 import com.flightmanagement.payment.dto.PaymentCallback;
 import com.flightmanagement.payment.dto.PaymentEntry;
 import com.flightmanagement.payment.dto.PaymentRequest;
@@ -22,7 +23,12 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Mock payment service for simulating payment processing.
- * Randomly returns SUCCESS, FAILURE, or TIMEOUT outcomes.
+ * 
+ * Staff Engineer Design:
+ * - Configurable success/failure rates for testing
+ * - Async processing with callbacks
+ * - Deterministic outcomes for testing (forced outcome)
+ * - In-memory storage (would be DB in production)
  */
 @Service
 @RequiredArgsConstructor
@@ -35,16 +41,16 @@ public class PaymentService {
     @Value("${booking-service.url}")
     String bookingServiceUrl;
 
-    @Value("${payment.success-probability:70}")
+    @Value("${payment.success-probability:" + PaymentConstants.DEFAULT_SUCCESS_PROBABILITY + "}")
     int successProbability;
 
-    @Value("${payment.failure-probability:20}")
+    @Value("${payment.failure-probability:" + PaymentConstants.DEFAULT_FAILURE_PROBABILITY + "}")
     int failureProbability;
 
-    @Value("${payment.min-processing-delay-ms:1000}")
+    @Value("${payment.min-processing-delay-ms:" + PaymentConstants.DEFAULT_MIN_PROCESSING_DELAY_MS + "}")
     int minProcessingDelay;
 
-    @Value("${payment.max-processing-delay-ms:5000}")
+    @Value("${payment.max-processing-delay-ms:" + PaymentConstants.DEFAULT_MAX_PROCESSING_DELAY_MS + "}")
     int maxProcessingDelay;
 
     final Random random = new Random();
@@ -94,11 +100,15 @@ public class PaymentService {
     public PaymentEntry processPaymentSync(PaymentRequest request) {
         String paymentId = generatePaymentId();
 
-        log.info("Processing payment (sync): id={}, bookingId={}", paymentId, request.getBookingId());
+        log.info("Processing payment (sync): paymentId={}, bookingId={}, amount={}", 
+                paymentId, request.getBookingId(), request.getAmount());
 
         // Shorter delay for sync
         try {
-            Thread.sleep(random.nextInt(1000) + 500);
+            int delay = random.nextInt(PaymentConstants.SYNC_PROCESSING_MAX_DELAY_MS 
+                            - PaymentConstants.SYNC_PROCESSING_MIN_DELAY_MS) 
+                    + PaymentConstants.SYNC_PROCESSING_MIN_DELAY_MS;
+            Thread.sleep(delay);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -195,9 +205,9 @@ public class PaymentService {
 
     private String getStatusMessage(PaymentStatus status) {
         return switch (status) {
-            case SUCCESS -> "Payment processed successfully";
-            case FAILURE -> "Payment declined by issuing bank";
-            case TIMEOUT -> "Payment processing timed out";
+            case SUCCESS -> PaymentConstants.MESSAGE_SUCCESS;
+            case FAILURE -> PaymentConstants.MESSAGE_FAILURE;
+            case TIMEOUT -> PaymentConstants.MESSAGE_TIMEOUT;
         };
     }
 
@@ -244,6 +254,7 @@ public class PaymentService {
     }
 
     private String generatePaymentId() {
-        return "PAY" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        return PaymentConstants.PAYMENT_ID_PREFIX 
+                + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
     }
 }

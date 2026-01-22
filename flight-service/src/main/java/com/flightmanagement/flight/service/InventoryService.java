@@ -52,6 +52,23 @@ public class InventoryService {
     }
 
     @Transactional
+    public boolean decrementSeatsDbOnly(String flightId, int count) {
+        int updated = flightRepository.decrementAvailableSeats(flightId, count);
+        if (updated == 0) {
+            log.warn("DB-only seat decrement failed: flightId={}, requested={}", flightId, count);
+            return false;
+        }
+        log.debug("DB-only decrement: flightId={}, count={}", flightId, count);
+        return true;
+    }
+
+    @Transactional
+    public void incrementSeatsDbOnly(String flightId, int count) {
+        flightRepository.incrementAvailableSeats(flightId, count);
+        log.debug("DB-only increment: flightId={}, count={}", flightId, count);
+    }
+
+    @Transactional
     public void incrementSeats(String flightId, int count) {
         flightRepository.incrementAvailableSeats(flightId, count);
 
@@ -75,7 +92,7 @@ public class InventoryService {
         log.debug("Set seats: flightId={}, seats={}", flightId, seats);
     }
 
-    public void syncFromDb(String flightId) {
+    public void syncCacheFromDb(String flightId) {
         flightRepository.findByFlightId(flightId).ifPresent(flight -> {
             cacheService.setSeats(flightId, flight.getAvailableSeats());
             log.info("Synced flight {} from DB to cache: {} seats", flightId, flight.getAvailableSeats());

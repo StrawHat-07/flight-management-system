@@ -7,7 +7,6 @@ import com.flightmanagement.flight.dto.SearchRequest;
 import com.flightmanagement.flight.dto.SearchResponse;
 import com.flightmanagement.flight.exception.FlightValidationException;
 import com.flightmanagement.flight.model.Flight;
-import com.flightmanagement.flight.repository.FlightRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -21,6 +20,7 @@ import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -43,6 +44,9 @@ class SearchServiceTest {
 
         @Mock
         private CacheService cacheService;
+
+        @Mock
+        private RouteFinderService routeFinderService;
 
         @Spy
         private ObjectMapper objectMapper = new ObjectMapper();
@@ -62,10 +66,10 @@ class SearchServiceTest {
                 searchService = new SearchService(
                                 graphService,
                                 cacheService,
+                                routeFinderService,
                                 objectMapper,
                                 3,
-                                24,
-                                60);
+                                24);
         }
 
         private Map<String, List<Flight>> createTestGraph(LocalDate date) {
@@ -108,13 +112,6 @@ class SearchServiceTest {
                                         .hasMessageContaining("required");
                 }
 
-                // ========== Basic Validation Tests Removed ==========
-                // Note: Jakarta Bean Validation (@NotBlank, @NotNull, @Min) handles these at controller level
-                // The following test is no longer relevant for service-layer unit tests:
-                // - rejectsMissingSource → Jakarta @NotBlank
-                
-                // We only test BUSINESS LOGIC validation in service layer
-
                 @Test
                 @DisplayName("rejects same source and destination (business rule)")
                 void rejectsSameSourceDestination() {
@@ -155,6 +152,18 @@ class SearchServiceTest {
                                         .thenReturn(Optional.empty());
                         when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(180);
 
+                        // Mock routeFinderService to return a direct flight
+                        ComputedFlightEntry directFlight = ComputedFlightEntry.builder()
+                                        .computedFlightId("FL101")
+                                        .source("DEL")
+                                        .destination("BLR")
+                                        .flightIds(List.of("FL101"))
+                                        .numberOfHops(1)
+                                        .totalPrice(BigDecimal.valueOf(5500))
+                                        .build();
+                        when(routeFinderService.findRoutes(eq("DEL"), eq("BLR"), eq(testDate), eq(1), any()))
+                                        .thenReturn(List.of(directFlight));
+
                         SearchRequest request = SearchRequest.builder()
                                         .source("DEL")
                                         .destination("BLR")
@@ -179,6 +188,18 @@ class SearchServiceTest {
                                         .thenReturn(Optional.empty());
                         when(cacheService.getMinSeatsAcrossFlights(any())).thenReturn(2);
 
+                        // Mock routeFinderService to return a flight with limited seats
+                        ComputedFlightEntry directFlight = ComputedFlightEntry.builder()
+                                        .computedFlightId("FL101")
+                                        .source("DEL")
+                                        .destination("BLR")
+                                        .flightIds(List.of("FL101"))
+                                        .numberOfHops(1)
+                                        .totalPrice(BigDecimal.valueOf(5500))
+                                        .build();
+                        when(routeFinderService.findRoutes(eq("DEL"), eq("BLR"), eq(testDate), eq(1), any()))
+                                        .thenReturn(List.of(directFlight));
+
                         SearchRequest request = SearchRequest.builder()
                                         .source("DEL")
                                         .destination("BLR")
@@ -198,6 +219,9 @@ class SearchServiceTest {
                 void returnsEmptyForNoRoute() {
                         when(cacheService.getCachedRoutes(anyString(), anyInt(), anyString(), anyString()))
                                         .thenReturn(Optional.empty());
+                        // Mock routeFinderService to return empty for non-existent route
+                        when(routeFinderService.findRoutes(anyString(), anyString(), any(), anyInt(), any()))
+                                        .thenReturn(Collections.emptyList());
 
                         SearchRequest request = SearchRequest.builder()
                                         .source("DEL")

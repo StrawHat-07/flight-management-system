@@ -1,5 +1,6 @@
 package com.flightmanagement.booking.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
 
@@ -7,21 +8,19 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
-/**
- * DTO representing a computed (multi-hop) flight route.
- * Must match the structure returned by Flight Service.
- */
+
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
 @FieldDefaults(level = AccessLevel.PRIVATE)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ComputedFlightEntry {
 
     String computedFlightId;
     List<String> flightIds;
-    String src;
-    String dest;
+    String source;
+    String destination;
     BigDecimal totalPrice;
     Long totalDurationMinutes;
     Integer availableSeats;
@@ -35,10 +34,11 @@ public class ComputedFlightEntry {
     @NoArgsConstructor
     @AllArgsConstructor
     @FieldDefaults(level = AccessLevel.PRIVATE)
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class FlightLeg {
         String flightId;
-        String src;
-        String dest;
+        String source;
+        String destination;
         LocalDateTime departureTime;
         LocalDateTime arrivalTime;
         BigDecimal price;

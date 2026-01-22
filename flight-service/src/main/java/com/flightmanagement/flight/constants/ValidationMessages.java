@@ -31,5 +31,7 @@ public final class ValidationMessages {
     public static final String DATE_REQUIRED = "Date is required";
     public static final String DATE_NOT_PAST = "Date cannot be in the past";
     public static final String SEATS_MIN = "Seats must be at least 1";
+    public static final String SEATS_REQUIRED = "Number of seats is required";
+    public static final String BOOKING_ID_REQUIRED = "Booking ID is required";
     public static final String FLIGHT_IDENTIFIER_REQUIRED = "Flight identifier is required";
 }

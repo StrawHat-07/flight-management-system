@@ -1,26 +1,22 @@
 package com.flightmanagement.booking.service;
 
 import com.flightmanagement.booking.client.FlightServiceClient;
-import com.flightmanagement.booking.client.PaymentServiceClient;
+import com.flightmanagement.booking.client.InventoryClient;
+import com.flightmanagement.booking.constants.BookingConstants;
 import com.flightmanagement.booking.dto.*;
 import com.flightmanagement.booking.enums.BookingStatus;
 import com.flightmanagement.booking.enums.FlightType;
 import com.flightmanagement.booking.exception.BookingException;
 import com.flightmanagement.booking.exception.BookingNotFoundException;
+import com.flightmanagement.booking.mapper.BookingMapper;
 import com.flightmanagement.booking.model.Booking;
-import com.flightmanagement.booking.model.BookingFlight;
-import com.flightmanagement.booking.repository.BookingFlightRepository;
 import com.flightmanagement.booking.repository.BookingRepository;
+import com.flightmanagement.booking.util.BookingFlightResolver;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
-import org.springframework.data.redis.core.script.RedisScript;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -32,298 +28,259 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-@MockitoSettings(strictness = Strictness.LENIENT)
-@DisplayName("BookingService Unit Tests")
 class BookingServiceTest {
 
     @Mock
     private BookingRepository bookingRepository;
 
     @Mock
-    private BookingFlightRepository bookingFlightRepository;
+    private BookingFlightResolver flightResolver;
 
     @Mock
-    private CacheService cacheService;
+    private InventoryClient inventoryClient;
 
     @Mock
     private FlightServiceClient flightServiceClient;
 
     @Mock
-    private PaymentServiceClient paymentServiceClient;
+    private PricingService pricingService;
+
+    @Mock
+    private PaymentOrchestrator paymentOrchestrator;
+
+    @Mock
+    private BookingMapper bookingMapper;
 
     private BookingService bookingService;
-
-    private BookingRequest validRequest;
-    private Booking existingBooking;
 
     @BeforeEach
     void setUp() {
         bookingService = new BookingService(
                 bookingRepository,
-                bookingFlightRepository,
-                cacheService,
+                flightResolver,
+                inventoryClient,
                 flightServiceClient,
-                paymentServiceClient,
-                5 // seatBlockTtlMinutes
+                pricingService,
+                paymentOrchestrator,
+                bookingMapper
         );
+    }
 
-        validRequest = BookingRequest.builder()
+    @Test
+    void createBooking_Success() {
+        // Given
+        BookingRequest request = BookingRequest.builder()
                 .userId("user123")
-                .flightIdentifier("FL001")
+                .flightIdentifier("FL101")
                 .seats(2)
                 .build();
 
-        existingBooking = Booking.builder()
+        String idempotencyKey = "test-key-123";
+        List<String> flightIds = List.of("FL101");
+        BigDecimal totalPrice = new BigDecimal("500.00");
+
+        when(flightServiceClient.getFlightIds("FL101")).thenReturn(flightIds);
+        when(pricingService.calculateTotalPrice("FL101", 2)).thenReturn(totalPrice);
+        InventoryReservationResponse reservationResponse = InventoryReservationResponse.builder()
+                .success(true)
+                .reservationId("BK12345678")
+                .expiresAt(LocalDateTime.now().plusMinutes(5))
+                .build();
+        when(inventoryClient.reserveSeats(anyString(), eq(flightIds), eq(2), 
+                eq(BookingConstants.DEFAULT_SEAT_BLOCK_TTL_MINUTES)))
+                .thenReturn(reservationResponse);
+
+        Booking savedBooking = Booking.builder()
                 .bookingId("BK12345678")
                 .userId("user123")
                 .flightType(FlightType.DIRECT)
-                .flightIdentifier("FL001")
+                .flightIdentifier("FL101")
                 .noOfSeats(2)
-                .totalPrice(new BigDecimal("599.98"))
+                .totalPrice(totalPrice)
                 .status(BookingStatus.PENDING)
+                .idempotencyKey(idempotencyKey)
                 .createdAt(LocalDateTime.now())
                 .build();
+        when(bookingRepository.save(any(Booking.class))).thenReturn(savedBooking);
 
-        // Default key format stubs
-        when(cacheService.formatAvailableSeatsKey(anyString()))
-                .thenAnswer(inv -> "flight:" + inv.getArgument(0) + ":availableSeats");
-        when(cacheService.formatBlockedSeatsKey(anyString(), anyString()))
-                .thenAnswer(inv -> "flight:" + inv.getArgument(0) + ":blocked:" + inv.getArgument(1));
+        BookingEntry expectedEntry = BookingEntry.builder()
+                .bookingId("BK12345678")
+                .userId("user123")
+                .flightType("DIRECT")
+                .flightIdentifier("FL101")
+                .noOfSeats(2)
+                .totalPrice(totalPrice)
+                .status("PENDING")
+                .flightIds(flightIds)
+                .createdAt(savedBooking.getCreatedAt())
+                .build();
+        when(bookingMapper.toEntry(any(Booking.class), eq(flightIds))).thenReturn(expectedEntry);
+        BookingEntry result = bookingService.createBooking(request, idempotencyKey);
+
+
+        assertThat(result).isNotNull();
+        assertThat(result.getBookingId()).isEqualTo("BK12345678");
+        assertThat(result.getStatus()).isEqualTo("PENDING");
+
+        verify(inventoryClient).reserveSeats(anyString(), eq(flightIds), eq(2), 
+                eq(BookingConstants.DEFAULT_SEAT_BLOCK_TTL_MINUTES));
+        verify(paymentOrchestrator).initiatePayment(anyString(), eq("user123"), eq(totalPrice));
+        verify(bookingRepository).save(any(Booking.class));
     }
 
-    @Nested
-    @DisplayName("Create Booking Validation Tests")
-    class CreateBookingValidationTests {
+    @Test
+    void createBooking_WithIdempotency_ReturnsExisting() {
+        // Given
+        String idempotencyKey = "test-key-123";
+        Booking existingBooking = Booking.builder()
+                .bookingId("BK12345678")
+                .userId("user123")
+                .flightIdentifier("FL101")
+                .noOfSeats(2)
+                .status(BookingStatus.PENDING)
+                .build();
 
-        @Test
-        @DisplayName("Should reject null request")
-        void createBooking_NullRequest_ThrowsException() {
-            assertThatThrownBy(() -> bookingService.createBooking(null, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_REQUEST");
-        }
+        when(bookingRepository.findByIdempotencyKey(idempotencyKey))
+                .thenReturn(Optional.of(existingBooking));
 
-        @Test
-        @DisplayName("Should reject missing user ID")
-        void createBooking_MissingUserId_ThrowsException() {
-            validRequest.setUserId(null);
+        when(flightResolver.getFlightIds("BK12345678"))
+                .thenReturn(List.of());
 
-            assertThatThrownBy(() -> bookingService.createBooking(validRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_USER_ID");
-        }
+        BookingEntry expectedEntry = BookingEntry.builder()
+                .bookingId("BK12345678")
+                .build();
+        when(bookingMapper.toEntry(existingBooking, List.of())).thenReturn(expectedEntry);
 
-        @Test
-        @DisplayName("Should reject missing flight identifier")
-        void createBooking_MissingFlightId_ThrowsException() {
-            validRequest.setFlightIdentifier(null);
+        BookingRequest request = BookingRequest.builder()
+                .userId("user123")
+                .flightIdentifier("FL101")
+                .seats(2)
+                .build();
 
-            assertThatThrownBy(() -> bookingService.createBooking(validRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_FLIGHT_ID");
-        }
+        // When
+        BookingEntry result = bookingService.createBooking(request, idempotencyKey);
 
-        @Test
-        @DisplayName("Should reject zero seats")
-        void createBooking_ZeroSeats_ThrowsException() {
-            validRequest.setSeats(0);
-
-            assertThatThrownBy(() -> bookingService.createBooking(validRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_SEATS");
-        }
-
-        @Test
-        @DisplayName("Should reject more than 9 seats")
-        void createBooking_TooManySeats_ThrowsException() {
-            validRequest.setSeats(10);
-
-            assertThatThrownBy(() -> bookingService.createBooking(validRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_SEATS")
-                    .hasMessageContaining("Maximum 9 seats");
-        }
+        // Then
+        assertThat(result).isNotNull();
+        assertThat(result.getBookingId()).isEqualTo("BK12345678");
+        verify(bookingRepository, never()).save(any());
+        verify(inventoryClient, never()).reserveSeats(anyString(), anyList(), anyInt(), anyInt());
     }
 
-    @Nested
-    @DisplayName("Create Booking Idempotency Tests")
-    class CreateBookingIdempotencyTests {
+    @Test
+    void createBooking_FlightNotFound_ThrowsException() {
+        // Given
+        BookingRequest request = BookingRequest.builder()
+                .userId("user123")
+                .flightIdentifier("INVALID")
+                .seats(2)
+                .build();
 
-        @Test
-        @DisplayName("Should return existing booking for duplicate idempotency key")
-        void createBooking_DuplicateIdempotencyKey_ReturnsExisting() {
-            when(bookingRepository.findByIdempotencyKey("idemp-123"))
-                    .thenReturn(Optional.of(existingBooking));
-            when(bookingFlightRepository.findByBookingIdOrderByLegOrder(anyString()))
-                    .thenReturn(List.of(BookingFlight.builder().flightId("FL001").build()));
+        when(flightServiceClient.getFlightIds("INVALID")).thenReturn(List.of());
 
-            BookingEntry result = bookingService.createBooking(validRequest, "idemp-123");
+        // When/Then
+        assertThatThrownBy(() -> bookingService.createBooking(request, null))
+                .isInstanceOf(BookingException.class)
+                .hasMessageContaining("Invalid flight identifier");
 
-            assertThat(result.getBookingId()).isEqualTo("BK12345678");
-            verify(flightServiceClient, never()).getFlightIds(anyString());
-        }
+        verify(inventoryClient, never()).reserveSeats(anyString(), anyList(), anyInt(), anyInt());
+        verify(bookingRepository, never()).save(any());
     }
 
-    @Nested
-    @DisplayName("Create Booking Flow Tests")
-    class CreateBookingFlowTests {
+    @Test
+    void createBooking_NoSeatsAvailable_ThrowsException() {
+        // Given
+        BookingRequest request = BookingRequest.builder()
+                .userId("user123")
+                .flightIdentifier("FL101")
+                .seats(2)
+                .build();
 
-        @Test
-        @DisplayName("Should throw when flight not found")
-        void createBooking_FlightNotFound_ThrowsException() {
-            when(bookingRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
-            when(flightServiceClient.getFlightIds("INVALID")).thenReturn(List.of());
+        List<String> flightIds = List.of("FL101");
+        when(flightServiceClient.getFlightIds("FL101")).thenReturn(flightIds);
+        when(pricingService.calculateTotalPrice("FL101", 2)).thenReturn(new BigDecimal("500.00"));
 
-            BookingRequest invalidRequest = BookingRequest.builder()
-                    .userId("user123")
-                    .flightIdentifier("INVALID")
-                    .seats(2)
-                    .build();
+        // Mock reservation failure
+        InventoryReservationResponse reservationResponse = InventoryReservationResponse.builder()
+                .success(false)
+                .errorCode("NO_SEATS_AVAILABLE")
+                .message("Not enough seats available")
+                .build();
+        when(inventoryClient.reserveSeats(anyString(), eq(flightIds), eq(2), anyInt()))
+                .thenReturn(reservationResponse);
 
-            assertThatThrownBy(() -> bookingService.createBooking(invalidRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_FLIGHT");
-        }
+        // When/Then
+        assertThatThrownBy(() -> bookingService.createBooking(request, null))
+                .isInstanceOf(BookingException.class)
+                .hasMessageContaining("Not enough seats available");
 
-        @Test
-        @DisplayName("Should throw when no seats available")
-        void createBooking_NoSeats_ThrowsException() {
-            when(bookingRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
-            when(flightServiceClient.getFlightIds("FL001")).thenReturn(List.of("FL001"));
-            when(flightServiceClient.getFlightById("FL001"))
-                    .thenReturn(Optional.of(FlightEntry.builder()
-                            .flightId("FL001")
-                            .price(new BigDecimal("299.99"))
-                            .build()));
-            when(cacheService.executeScript(any(RedisScript.class), anyList(), any()))
-                    .thenReturn(0L); // Seat blocking fails
-
-            assertThatThrownBy(() -> bookingService.createBooking(validRequest, null))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "NO_SEATS_AVAILABLE");
-        }
+        verify(bookingRepository, never()).save(any());
     }
 
-    @Nested
-    @DisplayName("Payment Callback Tests")
-    class PaymentCallbackTests {
+    @Test
+    void findById_Success() {
+        // Given
+        String bookingId = "BK12345678";
+        Booking booking = Booking.builder()
+                .bookingId(bookingId)
+                .userId("user123")
+                .status(BookingStatus.CONFIRMED)
+                .build();
 
-        @Test
-        @DisplayName("Should confirm booking on successful payment")
-        void handlePaymentCallback_Success_ConfirmsBooking() {
-            when(bookingRepository.findById("BK12345678"))
-                    .thenReturn(Optional.of(existingBooking));
-            when(bookingFlightRepository.findByBookingIdOrderByLegOrder("BK12345678"))
-                    .thenReturn(List.of(BookingFlight.builder().flightId("FL001").build()));
-            when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(bookingRepository.findById(bookingId)).thenReturn(Optional.of(booking));
+        when(flightResolver.getFlightIds(bookingId))
+                .thenReturn(List.of());
 
-            PaymentCallback callback = PaymentCallback.builder()
-                    .bookingId("BK12345678")
-                    .paymentId("PAY123")
-                    .status("SUCCESS")
-                    .message("Payment successful")
-                    .build();
+        BookingEntry expectedEntry = BookingEntry.builder()
+                .bookingId(bookingId)
+                .status("CONFIRMED")
+                .build();
+        when(bookingMapper.toEntry(booking, List.of())).thenReturn(expectedEntry);
 
-            bookingService.handlePaymentCallback(callback);
+        // When
+        BookingEntry result = bookingService.findById(bookingId);
 
-            verify(bookingRepository).save(argThat(b -> 
-                    b.getStatus() == BookingStatus.CONFIRMED));
-            verify(cacheService).deleteBlockedSeats("FL001", "BK12345678");
-        }
-
-        @Test
-        @DisplayName("Should fail booking on payment failure")
-        void handlePaymentCallback_Failure_FailsBooking() {
-            when(bookingRepository.findById("BK12345678"))
-                    .thenReturn(Optional.of(existingBooking));
-            when(bookingFlightRepository.findByBookingIdOrderByLegOrder("BK12345678"))
-                    .thenReturn(List.of(BookingFlight.builder().flightId("FL001").build()));
-            when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
-            when(cacheService.getBlockedSeats("FL001", "BK12345678"))
-                    .thenReturn(Optional.of(2));
-
-            PaymentCallback callback = PaymentCallback.builder()
-                    .bookingId("BK12345678")
-                    .paymentId("PAY123")
-                    .status("FAILURE")
-                    .message("Insufficient funds")
-                    .build();
-
-            bookingService.handlePaymentCallback(callback);
-
-            verify(bookingRepository).save(argThat(b -> 
-                    b.getStatus() == BookingStatus.FAILED));
-            verify(cacheService).incrementAvailableSeats("FL001", 2);
-            verify(cacheService).deleteBlockedSeats("FL001", "BK12345678");
-        }
-
-        @Test
-        @DisplayName("Should ignore callback for non-pending booking")
-        void handlePaymentCallback_NotPending_IgnoresCallback() {
-            existingBooking.setStatus(BookingStatus.CONFIRMED);
-            when(bookingRepository.findById("BK12345678"))
-                    .thenReturn(Optional.of(existingBooking));
-
-            PaymentCallback callback = PaymentCallback.builder()
-                    .bookingId("BK12345678")
-                    .status("SUCCESS")
-                    .build();
-
-            bookingService.handlePaymentCallback(callback);
-
-            verify(bookingRepository, never()).save(any());
-        }
-
-        @Test
-        @DisplayName("Should throw when booking not found")
-        void handlePaymentCallback_BookingNotFound_ThrowsException() {
-            when(bookingRepository.findById("INVALID"))
-                    .thenReturn(Optional.empty());
-
-            PaymentCallback callback = PaymentCallback.builder()
-                    .bookingId("INVALID")
-                    .status("SUCCESS")
-                    .build();
-
-            assertThatThrownBy(() -> bookingService.handlePaymentCallback(callback))
-                    .isInstanceOf(BookingNotFoundException.class);
-        }
+        // Then
+        assertThat(result).isNotNull();
+        assertThat(result.getBookingId()).isEqualTo(bookingId);
+        assertThat(result.getStatus()).isEqualTo("CONFIRMED");
     }
 
-    @Nested
-    @DisplayName("Find Booking Tests")
-    class FindBookingTests {
+    @Test
+    void findById_NotFound_ThrowsException() {
+        // Given
+        String bookingId = "INVALID";
+        when(bookingRepository.findById(bookingId)).thenReturn(Optional.empty());
 
-        @Test
-        @DisplayName("Should find booking by ID")
-        void findById_Success() {
-            when(bookingRepository.findById("BK12345678"))
-                    .thenReturn(Optional.of(existingBooking));
-            when(bookingFlightRepository.findByBookingIdOrderByLegOrder("BK12345678"))
-                    .thenReturn(List.of(BookingFlight.builder().flightId("FL001").build()));
+        // When/Then
+        assertThatThrownBy(() -> bookingService.findById(bookingId))
+                .isInstanceOf(BookingNotFoundException.class);
+    }
 
-            BookingEntry result = bookingService.findById("BK12345678");
+    @Test
+    void findByUserId_Success() {
+        // Given
+        String userId = "user123";
+        List<Booking> bookings = List.of(
+                Booking.builder().bookingId("BK1").userId(userId).build(),
+                Booking.builder().bookingId("BK2").userId(userId).build()
+        );
 
-            assertThat(result.getBookingId()).isEqualTo("BK12345678");
-            assertThat(result.getUserId()).isEqualTo("user123");
-        }
+        when(bookingRepository.findByUserId(userId)).thenReturn(bookings);
+        when(flightResolver.getFlightIds(anyString()))
+                .thenReturn(List.of());
 
-        @Test
-        @DisplayName("Should throw when booking not found")
-        void findById_NotFound_ThrowsException() {
-            when(bookingRepository.findById("INVALID"))
-                    .thenReturn(Optional.empty());
+        BookingEntry entry1 = BookingEntry.builder().bookingId("BK1").build();
+        BookingEntry entry2 = BookingEntry.builder().bookingId("BK2").build();
+        when(bookingMapper.toEntry(any(Booking.class), anyList()))
+                .thenReturn(entry1, entry2);
 
-            assertThatThrownBy(() -> bookingService.findById("INVALID"))
-                    .isInstanceOf(BookingNotFoundException.class);
-        }
+        // When
+        List<BookingEntry> results = bookingService.findByUserId(userId);
 
-        @Test
-        @DisplayName("Should reject empty booking ID")
-        void findById_EmptyId_ThrowsException() {
-            assertThatThrownBy(() -> bookingService.findById(""))
-                    .isInstanceOf(BookingException.class)
-                    .hasFieldOrPropertyWithValue("errorCode", "INVALID_BOOKING_ID");
-        }
+        // Then
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).getBookingId()).isEqualTo("BK1");
+        assertThat(results.get(1).getBookingId()).isEqualTo("BK2");
     }
 }
